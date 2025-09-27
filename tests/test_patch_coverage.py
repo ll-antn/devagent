@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_agent.metrics.coverage import compute_patch_coverage
+from ai_dev_agent.engine.metrics.coverage import compute_patch_coverage
 
 
 @pytest.fixture()

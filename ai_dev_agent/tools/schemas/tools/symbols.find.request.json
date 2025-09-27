@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "symbols.find request",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string" },
+    "kind": { "type": "string" },
+    "lang": { "type": "string" }
+  },
+  "additionalProperties": false
+}

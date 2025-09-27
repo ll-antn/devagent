@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ai_dev_agent.security import scan_for_secrets
+from ai_dev_agent.tools.analysis.security import scan_for_secrets
 
 
 def test_secret_scan_detects_known_patterns(tmp_path: Path) -> None:

@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "code.search response",
+  "type": "object",
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "line", "col", "preview"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "col": { "type": "integer", "minimum": 1 },
+          "preview": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

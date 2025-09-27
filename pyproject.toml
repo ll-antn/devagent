@@ -16,7 +16,8 @@ dependencies = [
   "tomli; python_version < '3.11'",
   "tree-sitter==0.20.1",
   "tree-sitter-languages>=1.10",
-  "pyyaml>=6.0"
+  "pyyaml>=6.0",
+  "jsonschema>=4.21"
 ]
 
 [project.scripts]

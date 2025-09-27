@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_agent.metrics.diff import compute_diff_metrics
+from ai_dev_agent.engine.metrics.diff import compute_diff_metrics
 
 
 @pytest.fixture()

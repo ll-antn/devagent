@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ai_dev_agent.questions.inspector import RepositoryInspector
+from ai_dev_agent.tools.query.questions.inspector import RepositoryInspector
 
 
 def test_inspector_finds_root_extension(tmp_path: Path) -> None:

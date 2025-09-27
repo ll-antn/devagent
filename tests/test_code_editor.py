@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_agent.approval.approvals import ApprovalManager
-from ai_dev_agent.approval.policy import ApprovalPolicy
-from ai_dev_agent.code_edit.editor import CodeEditor, IterativeFixConfig
-from ai_dev_agent.llm_provider.base import LLMError
+from ai_dev_agent.core.approval.approvals import ApprovalManager
+from ai_dev_agent.core.approval.policy import ApprovalPolicy
+from ai_dev_agent.tools.code.code_edit.editor import CodeEditor, IterativeFixConfig
+from ai_dev_agent.providers.llm.base import LLMError
 
 
 class DiffClient:
@@ -106,7 +106,6 @@ def test_apply_diff_with_fixes_invokes_preview_callback(tmp_path):
     success, attempts = editor.apply_diff_with_fixes(
         "Update greeting",
         ["file.txt"],
-        dry_run=False,
         on_proposal=lambda proposal, attempt: previews.append(
             (attempt, proposal.preview.summary if proposal.preview else "")
         ),

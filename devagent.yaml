@@ -1,38 +1,20 @@
-version: 1
-workspace:
-  root: .
-  write_allowlist:
-    - src/**
-    - tests/**
-    - docs/**
-vcs:
-  auto_commit: true
-  commit_template: "[devagent] {step_id}: {summary}"
-build:
-  cmd: "make build"
+# Essential CI commands
 tests:
   cmd: "pytest"
-  pattern_flag: "-k"
-coverage:
-  cmd: ""
-  threshold:
-    diff: 0.80
-    project: 0.60
 lint:
   cmd: "ruff ."
 types:
   cmd: "mypy ."
 format:
   cmd: "ruff format ."
-gates:
-  - name: tests
-    must_be: green
-  - name: lint
-    must_be: zero_errors
-  - name: types
-    must_be: zero_errors
-  - name: coverage.diff
-    gte: 0.80
-  - name: diff.size
-    lte_lines: 400
-    lte_files: 10
+
+# Optional coverage thresholds
+coverage:
+  threshold:
+    diff: 0.80
+    project: 0.60
+
+# Simplified iteration cap
+react:
+  iteration:
+    global_cap: 500

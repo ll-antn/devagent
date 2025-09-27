@@ -1,6 +1,6 @@
-from ai_dev_agent.intent_router import IntentDecision, IntentRouter, IntentRoutingError
-from ai_dev_agent.llm_provider.base import ToolCall, ToolCallResult
-from ai_dev_agent.utils.config import Settings
+from ai_dev_agent.cli.router import IntentDecision, IntentRouter, IntentRoutingError
+from ai_dev_agent.providers.llm.base import ToolCall, ToolCallResult
+from ai_dev_agent.core.utils.config import Settings
 
 
 class DummyClient:
@@ -18,16 +18,19 @@ class DummyClient:
 def test_intent_router_returns_tool_decision(tmp_path):
     settings = Settings()
     settings.workspace_root = tmp_path
-    result = ToolCallResult(calls=[ToolCall(name="list_directory", arguments={"path": "."})], message_content="Listing workspace")
+    result = ToolCallResult(
+        calls=[ToolCall(name="exec", arguments={"cmd": "ls"})],
+        message_content="Enumerating workspace",
+    )
     client = DummyClient(result)
 
     router = IntentRouter(client, settings)
     decision = router.route("покажи содержимое директории")
 
     assert isinstance(decision, IntentDecision)
-    assert decision.tool == "list_directory"
-    assert decision.arguments["path"] == "."
-    assert decision.rationale == "Listing workspace"
+    assert decision.tool == "exec"
+    assert decision.arguments["cmd"] == "ls"
+    assert decision.rationale == "Enumerating workspace"
     assert client.captured_messages is not None
     assert client.captured_tools is not None
 
@@ -41,7 +44,7 @@ def test_intent_router_direct_response(tmp_path):
     router = IntentRouter(client, settings)
     decision = router.route("скажи привет")
 
-    assert decision.tool == "respond_directly"
+    assert decision.tool is None
     assert decision.arguments["text"] == "Просто ответ"
 
 

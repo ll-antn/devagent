@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ast.query request",
+  "type": "object",
+  "required": ["path", "query"],
+  "properties": {
+    "path": { "type": "string" },
+    "query": { "type": "string" },
+    "captures": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

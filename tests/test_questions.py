@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from ai_dev_agent.code_edit.context import ContextGatheringOptions
-from ai_dev_agent.llm_provider.base import LLMError
-from ai_dev_agent.questions import QuestionAnswerer
+from ai_dev_agent.tools.code.code_edit.context import ContextGatheringOptions
+from ai_dev_agent.providers.llm.base import LLMError
+from ai_dev_agent.tools.query.questions import QuestionAnswerer
 
 
 class DummyClient:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import subprocess
 
-from ai_dev_agent.code_edit.diff_utils import DiffProcessor
+from ai_dev_agent.tools.code.code_edit.diff_utils import DiffProcessor
 
 
 def test_diff_preview_handles_file_addition(tmp_path: Path) -> None:

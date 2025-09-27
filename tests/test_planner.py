@@ -1,11 +1,19 @@
-from ai_dev_agent.planning.planner import Planner
-from ai_dev_agent.llm_provider.base import LLMError, Message
+from ai_dev_agent.engine.planning.planner import Planner
+from ai_dev_agent.providers.llm.base import LLMError, Message
 
 
 class DummyClient:
     def complete(self, messages, temperature=0.2, max_tokens=None):
         assert isinstance(messages[0], Message)
-        return """```json\n{\n  \"summary\": \"Demo plan\",\n  \"tasks\": [\n    {\"id\": \"T1\", \"title\": \"Design\", \"description\": \"Do design\", \"category\": \"design\", \"effort\": 2, \"reach\": 1, \"impact\": 4, \"confidence\": 0.8},\n    {\"id\": \"T2\", \"title\": \"Implement\", \"description\": \"Do code\", \"category\": \"implementation\", \"effort\": 3, \"reach\": 1, \"impact\": 5, \"confidence\": 0.7}\n  ]\n}\n```"""
+        return """```json
+{
+  "summary": "Demo plan",
+  "tasks": [
+    {"step_number": 1, "title": "Design", "description": "Design the feature architecture and define interfaces"},
+    {"step_number": 2, "title": "Implement", "description": "Write the code to implement the feature", "dependencies": [1]}
+  ]
+}
+```"""
 
 
 def test_planner_generates_tasks():
@@ -13,7 +21,32 @@ def test_planner_generates_tasks():
     result = planner.generate("Build feature")
     assert result.summary == "Demo plan"
     assert len(result.tasks) == 2
-    assert result.tasks[0].priority_score is not None
+    assert result.tasks[0].step_number == 1
+    assert result.tasks[0].title == "Design"
+    assert result.tasks[1].dependencies == [1]
+
+
+class SimpleClient:
+    def complete(self, messages, temperature=0.2, max_tokens=None):
+        return """```json
+{
+  "summary": "Research plan",
+  "tasks": [
+    {"step_number": 1, "title": "Investigate usage", "description": "Search repository for method usage"},
+    {"step_number": 2, "title": "Analyze findings", "description": "Review and count occurrences", "dependencies": [1]},
+    {"step_number": 3, "title": "Summarize results", "description": "Write report with findings", "dependencies": [2]}
+  ]
+}
+```"""
+
+
+def test_planner_simple_format():
+    planner = Planner(SimpleClient())
+    result = planner.generate("What methods can be removed from ETSChecker API?")
+    assert result.summary == "Research plan"
+    assert len(result.tasks) == 3
+    assert [task.step_number for task in result.tasks] == [1, 2, 3]
+    assert result.tasks[2].dependencies == [2]
 
 
 class FailingClient:
@@ -26,15 +59,12 @@ def test_planner_fallback_when_llm_unavailable():
     result = planner.generate("Improve resilience")
 
     assert result.fallback_reason == "Temporary outage"
-    assert [task.identifier for task in result.tasks] == [
-        "R1",
-        "R2",
-        "R3",
-        "R4",
-        "R5",
-        "R6",
-        "R7",
-        "R8",
-    ]
+    assert len(result.tasks) == 3
+    assert result.tasks[0].title == "Understand Requirements"
+    assert result.tasks[1].title == "Execute Task"
+    assert result.tasks[2].title == "Verify Results"
     assert result.raw_response == ""
-    assert all(task.priority_score is not None for task in result.tasks)
+    # Check dependencies
+    assert result.tasks[0].dependencies == []
+    assert result.tasks[1].dependencies == [1]
+    assert result.tasks[2].dependencies == [2]

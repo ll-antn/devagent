@@ -1,0 +1,8 @@
+# Minimal DevAgent user configuration
+# Copy this file to .devagent.toml and fill in your credentials.
+provider = "deepseek"
+model = "deepseek-chat"
+api_key = "sk-your-api-key"
+# base_url is optional if you use the provider default.
+# base_url = "https://api.deepseek.com/v1"
+auto_approve_code = false

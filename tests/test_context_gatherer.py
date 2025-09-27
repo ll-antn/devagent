@@ -1,6 +1,6 @@
 import textwrap
 
-from ai_dev_agent.code_edit.context import ContextGatherer, ContextGatheringOptions
+from ai_dev_agent.tools.code.code_edit.context import ContextGatherer, ContextGatheringOptions
 
 
 def test_gather_contexts_discovers_related_test_files(tmp_path):

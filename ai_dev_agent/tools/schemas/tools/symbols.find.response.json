@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "symbols.find response",
+  "type": "object",
+  "required": ["defs"],
+  "properties": {
+    "defs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "line", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "kind": { "type": "string" },
+          "scope": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "line"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

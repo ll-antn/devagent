@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from ai_dev_agent.cli import _update_task_state
-from ai_dev_agent.planning.reasoning import TaskReasoning, ToolUse
-from ai_dev_agent.utils.state import StateStore
+from ai_dev_agent.engine.planning.reasoning import TaskReasoning, ToolUse
+from ai_dev_agent.core.utils.state import StateStore
 
 
 def test_task_reasoning_serializes_steps_and_adjustments():

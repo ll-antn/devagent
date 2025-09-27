@@ -1,4 +1,4 @@
-from ai_dev_agent.utils.state import StateStore
+from ai_dev_agent.core.utils.state import StateStore
 
 
 def test_append_history_trims_entries():

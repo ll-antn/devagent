@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_dev_agent.code_edit.context import ContextGatherer
+from ai_dev_agent.tools.code.code_edit.context import ContextGatherer
 
 
 def test_context_gatherer_includes_structure_summary(tmp_path):

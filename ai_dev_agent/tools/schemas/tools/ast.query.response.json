@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ast.query response",
+  "type": "object",
+  "required": ["nodes"],
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["start_byte", "end_byte", "start_point", "end_point", "text"],
+        "properties": {
+          "start_byte": { "type": "integer", "minimum": 0 },
+          "end_byte": { "type": "integer", "minimum": 0 },
+          "start_point": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "end_point": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "text": { "type": "string" },
+          "captures": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "query_diagnostics": {
+      "type": "object",
+      "properties": {
+        "original_query": { "type": "string" },
+        "corrected_query": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["original_query", "corrected_query", "message"],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
