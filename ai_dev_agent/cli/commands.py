@@ -54,6 +54,7 @@ from ..core.utils.tool_utils import (
     SEARCH_TOOLS,
 )
 from ..tools import ToolContext, registry as tool_registry
+from ..tools.code.code_edit.tree_sitter_analysis import TreeSitterProjectAnalyzer
 
 LOGGER = get_logger(__name__)
 
@@ -98,6 +99,70 @@ def _resolve_repo_path(path_value: str | None) -> Path:
     if repo_root not in candidate.parents and candidate != repo_root:
         raise click.ClickException(f"Path '{path_value}' escapes the repository root.")
     return candidate
+
+
+def _collect_project_structure_outline(
+    repo_root: Path,
+    *,
+    max_files: int = 6,
+    max_file_bytes: int = 120_000,
+) -> Optional[str]:
+    """Return a lightweight project structure summary using tree-sitter when available."""
+
+    try:
+        analyzer = TreeSitterProjectAnalyzer(repo_root, max_files=max_files)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.debug("Failed to initialize TreeSitterProjectAnalyzer: %s", exc)
+        return None
+
+    if not analyzer.available:
+        return None
+
+    skip_dirs = {".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "__pycache__", ".venv", "venv"}
+
+    file_entries: List[Tuple[str, str]] = []
+    seen_paths: Set[str] = set()
+
+    for suffix in analyzer.SUPPORTED_SUFFIXES:
+        if len(file_entries) >= max_files:
+            break
+        try:
+            candidates = sorted(repo_root.rglob(f"*{suffix}"))
+        except OSError:  # pragma: no cover - defensive guard
+            continue
+        for path in candidates:
+            if len(file_entries) >= max_files:
+                break
+            if not path.is_file():
+                continue
+            if any(part in skip_dirs for part in path.parts):
+                continue
+            try:
+                if path.stat().st_size > max_file_bytes:
+                    continue
+            except OSError:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            try:
+                rel_path = str(path.relative_to(repo_root))
+            except ValueError:
+                continue
+            if rel_path in seen_paths:
+                continue
+            seen_paths.add(rel_path)
+            file_entries.append((rel_path, content))
+
+    if not file_entries:
+        return None
+
+    try:
+        return analyzer.build_project_summary(file_entries)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOGGER.debug("Failed to build project structure summary: %s", exc)
+        return None
 
 
 def _infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
@@ -1097,8 +1162,12 @@ def _execute_react_assistant(
 
     if planner_enabled:
         try:
+            project_structure = ctx.obj.get("_project_structure_summary")
+            if "_project_structure_summary" not in ctx.obj:
+                project_structure = _collect_project_structure_outline(Path.cwd())
+                ctx.obj["_project_structure_summary"] = project_structure
             planner = Planner(client)
-            structured_plan = planner.generate(user_prompt)
+            structured_plan = planner.generate(user_prompt, project_structure=project_structure)
         except LLMError as exc:
             LOGGER.warning("Planner failed to produce structured plan: %s", exc)
             planning_active = False

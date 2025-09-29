@@ -105,6 +105,35 @@ def test_ast_query(tmp_path: Path) -> None:
     assert result["nodes"], "Expected AST nodes from query"
 
 
+def test_ast_summary_mode(tmp_path: Path) -> None:
+    pytest.importorskip("tree_sitter_languages")
+    _init_git_repo(tmp_path)
+    path = tmp_path / "sample.py"
+    path.write_text(
+        """
+class Alpha:
+    def beta(self):
+        pass
+
+
+def gamma():
+    return 42
+""".strip(),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "sample.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add sample"], cwd=tmp_path, check=True)
+
+    ctx = _make_context(tmp_path)
+    result = tool_registry.invoke("ast.query", {"path": "sample.py", "mode": "summary"}, ctx)
+    assert result["mode"] == "summary"
+    summaries = result.get("summaries") or []
+    assert summaries, "Expected structural summaries"
+    assert summaries[0]["path"].endswith("sample.py")
+    outline = summaries[0]["outline"]
+    assert any("class Alpha" in line for line in outline)
+
+
 def test_exec_tool(tmp_path: Path) -> None:
     ctx = _make_context(tmp_path)
     result = tool_registry.invoke("exec", {"cmd": "echo", "args": ["hello"]}, ctx)

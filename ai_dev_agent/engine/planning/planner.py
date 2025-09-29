@@ -122,9 +122,10 @@ class PlanResult:
     tasks: List[PlanTask]
     raw_response: str
     fallback_reason: str | None = None
+    project_structure: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "goal": self.goal,
             "summary": self.summary,
             "tasks": [task.to_dict() for task in self.tasks],
@@ -132,6 +133,9 @@ class PlanResult:
             "status": "planned",
             "fallback_reason": self.fallback_reason,
         }
+        if self.project_structure:
+            data["project_structure"] = self.project_structure
+        return data
 
 
 class Planner:
@@ -140,11 +144,18 @@ class Planner:
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
-    def generate(self, goal: str) -> PlanResult:
+    def generate(self, goal: str, project_structure: Optional[str] = None) -> PlanResult:
         LOGGER.info("Requesting plan from LLM for goal: %s", goal)
+        user_prompt = USER_TEMPLATE.format(goal=goal.strip())
+        if project_structure:
+            user_prompt = (
+                f"{user_prompt}\n\nProject structure overview (keep in mind when planning):\n"
+                f"{project_structure}"
+            )
+
         messages: Sequence[Message] = (
             Message(role="system", content=SYSTEM_PROMPT),
-            Message(role="user", content=USER_TEMPLATE.format(goal=goal.strip())),
+            Message(role="user", content=user_prompt),
         )
         start_time = time.time()
         next_heartbeat = start_time + 10.0
@@ -177,6 +188,7 @@ class Planner:
                 tasks=tasks,
                 raw_response="",
                 fallback_reason=str(exc),
+                project_structure=project_structure,
             )
         try:
             payload = self._extract_json(response_text)
@@ -184,7 +196,13 @@ class Planner:
             raise LLMError(f"Planner response was not valid JSON: {exc}") from exc
         tasks = [self._task_from_dict(entry, idx) for idx, entry in enumerate(payload.get("tasks", []), 1)]
         summary = payload.get("summary", goal)
-        return PlanResult(goal=goal, summary=summary, tasks=tasks, raw_response=response_text)
+        return PlanResult(
+            goal=goal,
+            summary=summary,
+            tasks=tasks,
+            raw_response=response_text,
+            project_structure=project_structure,
+        )
 
     def _extract_json(self, text: str) -> dict:
         match = JSON_PATTERN.search(text)

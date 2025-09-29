@@ -2,8 +2,11 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ast.query response",
   "type": "object",
-  "required": ["nodes"],
   "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["query", "summary", "symbols"]
+    },
     "nodes": {
       "type": "array",
       "items": {
@@ -42,7 +45,38 @@
       },
       "required": ["original_query", "corrected_query", "message"],
       "additionalProperties": false
+    },
+    "summaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "outline"],
+        "properties": {
+          "path": { "type": "string" },
+          "outline": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "project_summary": { "type": "string" },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
     }
   },
+  "required": ["mode"],
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "query" } } },
+      "then": { "required": ["nodes"] }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "summary" } } },
+      "then": { "required": ["summaries"] }
+    }
+  ],
   "additionalProperties": false
 }

@@ -6,7 +6,7 @@ an empty result set instead of failing the entire tool registry import.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Dict, List, Mapping, Sequence
 
 from ai_dev_agent.core.tree_sitter import (
     build_capture_query,
@@ -17,6 +17,7 @@ from ai_dev_agent.core.tree_sitter import (
     normalise_language,
     slice_bytes,
 )
+from ai_dev_agent.tools.code.code_edit.tree_sitter_analysis import TreeSitterProjectAnalyzer
 
 from ..registry import ToolSpec, ToolContext, registry
 
@@ -155,28 +156,46 @@ def get_safe_fallback_query(language: str, original_query: str) -> str:
 
 
 def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, Any]:
+    mode = str(payload.get("mode", "query") or "query").lower()
+
+    if mode == "summary":
+        return _run_summary_mode(payload, context)
+    if mode in {"query", "default"}:
+        return _run_query_mode(payload, context)
+
+    raise ValueError(f"Unsupported ast.query mode: {mode}")
+
+
+def _run_query_mode(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, Any]:
     repo_root = context.repo_root
-    rel_path = payload["path"]
+    rel_path = payload.get("path")
+    if not rel_path:
+        raise ValueError("'path' is required for query mode")
+
     target = (repo_root / rel_path).resolve()
     if not target.exists():
         raise FileNotFoundError(rel_path)
 
+    query_text = payload.get("query")
+    if not query_text:
+        raise ValueError("'query' is required for query mode")
+
     source = target.read_text(encoding="utf-8", errors="ignore")
     handle = ensure_parser(target, content=source)
     if handle is None:  # pragma: no cover - optional dependency path
-        return {"nodes": []}
+        return {"mode": "query", "nodes": []}
 
     language_name = handle.language
     language_obj = language_object(language_name)
     if language_obj is None:  # pragma: no cover - optional dependency path
-        return {"nodes": []}
+        return {"mode": "query", "nodes": []}
 
     parser = handle.parser
     source_bytes = slice_bytes(source)
     tree = parser.parse(source_bytes)
 
     # Validate and potentially fix the query
-    original_query = payload["query"]
+    original_query = query_text
     is_valid, corrected_query, validation_msg = validate_query(original_query, language_name)
 
     if not is_valid:
@@ -193,23 +212,23 @@ def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str,
 
     try:
         query = language_obj.query(corrected_query)
-    except Exception as e:
+    except Exception as exc:
         # If corrected query still fails, try fallback
         fallback_query = get_safe_fallback_query(language_name, original_query)
         if fallback_query != "(ERROR) @error" and fallback_query != corrected_query:
             try:
                 query = language_obj.query(fallback_query)
-                validation_msg = f"Used fallback query '{fallback_query}' due to parse error: {str(e)}"
+                validation_msg = f"Used fallback query '{fallback_query}' due to parse error: {str(exc)}"
                 corrected_query = fallback_query
-            except Exception as e2:
+            except Exception as inner_exc:
                 raise ValueError(
                     "Both original query "
                     f"'{original_query}' and fallback query '{fallback_query}' failed for language "
-                    f"'{language_name}': {str(e2)}. If tree-sitter is not installed, try code.search instead."
+                    f"'{language_name}': {str(inner_exc)}. If tree-sitter is not installed, try code.search instead."
                 )
         else:
             raise ValueError(
-                f"Invalid query '{corrected_query}' for language '{language_name}': {str(e)}. "
+                f"Invalid query '{corrected_query}' for language '{language_name}': {str(exc)}. "
                 "If tree-sitter is not installed, try code.search instead."
             )
 
@@ -233,15 +252,63 @@ def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str,
             }
         )
 
-    result = {"nodes": nodes}
+    result: Dict[str, Any] = {"mode": "query", "nodes": nodes}
 
     # Add diagnostic information if query was corrected
     if corrected_query != original_query or "fallback" in validation_msg.lower():
         result["query_diagnostics"] = {
             "original_query": original_query,
             "corrected_query": corrected_query,
-            "message": validation_msg
+            "message": validation_msg,
         }
+
+    return result
+
+
+def _run_summary_mode(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, Any]:
+    repo_root = context.repo_root
+
+    raw_paths: Sequence[str] | None
+    if "paths" in payload and payload["paths"]:
+        raw_paths = [str(p) for p in payload["paths"]]  # type: ignore[list-item]
+    else:
+        single_path = payload.get("path")
+        raw_paths = [str(single_path)] if single_path else None
+
+    if not raw_paths:
+        raise ValueError("'path' or 'paths' is required for summary mode")
+
+    analyzer = TreeSitterProjectAnalyzer(repo_root, max_files=len(raw_paths))
+    if not analyzer.available:
+        return {
+            "mode": "summary",
+            "summaries": [],
+            "warnings": [
+                "tree-sitter support not available; unable to build structural summary",
+            ],
+        }
+
+    file_entries: List[tuple[str, str]] = []
+    summaries: List[Dict[str, Any]] = []
+
+    for rel_path in raw_paths:
+        target = (repo_root / rel_path).resolve()
+        if not target.exists():
+            raise FileNotFoundError(rel_path)
+        try:
+            content = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            raise RuntimeError(f"Failed to read {rel_path}: {exc}") from exc
+
+        outline = analyzer.summarize_content(rel_path, content)
+        summaries.append({"path": rel_path, "outline": outline})
+        file_entries.append((rel_path, content))
+
+    result: Dict[str, Any] = {"mode": "summary", "summaries": summaries}
+
+    project_summary = analyzer.build_project_summary(file_entries)
+    if project_summary:
+        result["project_summary"] = project_summary
 
     return result
 

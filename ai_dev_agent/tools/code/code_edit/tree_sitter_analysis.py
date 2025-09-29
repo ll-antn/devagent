@@ -73,6 +73,28 @@ class TreeSitterProjectAnalyzer:
         handle = self._manager.parser_for_language(language)
         return None if handle is None else handle.parser
 
+    def summarize_content(self, rel_path: str, content: str) -> List[str]:
+        """Return a structural outline for a single file."""
+
+        if not self.available:
+            return []
+
+        path = Path(rel_path)
+        abs_path = (self.repo_root / path).resolve()
+
+        handle = ensure_parser(abs_path, content=content)
+        if handle is None or handle.language not in self.SUPPORTED_LANGUAGES:
+            return []
+
+        parser = handle.parser
+        source_bytes = slice_bytes(content)
+        try:
+            tree = parser.parse(source_bytes)  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive guard
+            return []
+
+        return self._summarize_file(path, handle.language, tree, source_bytes)
+
     def build_project_summary(self, file_entries: Iterable[Tuple[str, str]]) -> Optional[str]:
         """Return a markdown summary describing the structure of the provided files."""
         if not self.available:
