@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
-from pydantic import BaseModel, Field, root_validator, validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 
 class ActionRequest(BaseModel):
@@ -16,8 +16,7 @@ class ActionRequest(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict, description="Keyword arguments for the tool.")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Auxiliary data for logging.")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class Observation(BaseModel):
@@ -31,8 +30,7 @@ class Observation(BaseModel):
     raw_output: Optional[str] = Field(default=None, description="Unstructured output for later inspection.")
     error: Optional[str] = Field(default=None, description="Error information if the action failed.")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class MetricsSnapshot(BaseModel):
@@ -55,11 +53,12 @@ class MetricsSnapshot(BaseModel):
     gate_notes: Dict[str, str] = Field(default_factory=dict)
     raw: Dict[str, Any] = Field(default_factory=dict)
 
-    @root_validator(pre=True)
+    @model_validator(mode='before')
+    @classmethod
     def _collect_raw(cls, values: Dict[str, Any]) -> Dict[str, Any]:
         raw = dict(values)
         for key in list(values.keys()):
-            if key in cls.__fields__:
+            if key in cls.model_fields:
                 raw.pop(key, None)
         values.setdefault("raw", raw)
         return values
@@ -92,7 +91,8 @@ class GateConfig(BaseModel):
     require_design_doc: bool = False
     require_perf: bool = False
 
-    @validator("patch_coverage_target")
+    @field_validator("patch_coverage_target")
+    @classmethod
     def _clamp_patch_cov(cls, value: float) -> float:
         if value < 0.0:
             return 0.0
@@ -100,7 +100,8 @@ class GateConfig(BaseModel):
             return 1.0
         return value
 
-    @validator("diff_limit_lines", "diff_limit_files", "stuck_threshold", "steps_budget")
+    @field_validator("diff_limit_lines", "diff_limit_files", "stuck_threshold", "steps_budget")
+    @classmethod
     def _ensure_positive(cls, value: int) -> int:
         return max(1, value)
 
