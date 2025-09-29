@@ -11,6 +11,7 @@ from .base import (
     LLMTimeoutError,
     Message,
     RetryConfig,
+    StreamHooks,
 )
 from .deepseek import DeepSeekClient, DEFAULT_BASE_URL as DEEPSEEK_DEFAULT_BASE_URL
 from .openrouter import OpenRouterClient, DEFAULT_BASE_URL as OPENROUTER_DEFAULT_BASE_URL
@@ -72,6 +73,7 @@ __all__ = [
     "LLMResponseError",
     "LLMRetryExhaustedError",
     "Message",
+    "StreamHooks",
     "RetryConfig",
     "DEEPSEEK_DEFAULT_BASE_URL",
     "OPENROUTER_DEFAULT_BASE_URL",

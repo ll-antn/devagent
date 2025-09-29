@@ -183,7 +183,24 @@ class ContextGatherer:
         # Search for files mentioned in task description
         if task_description and keywords:
             for keyword in keywords:
-                matches = self.search_files(keyword, ["py", "js", "ts", "java", "cpp", "h"])
+                matches = self.search_files(
+                    keyword,
+                    [
+                        "py",
+                        "js",
+                        "ts",
+                        "tsx",
+                        "java",
+                        "c",
+                        "cpp",
+                        "cc",
+                        "cxx",
+                        "h",
+                        "hpp",
+                        "hh",
+                        "hxx",
+                    ],
+                )
                 for match in matches[:5]:  # Limit search results
                     if match not in base_files:
                         score = self._calculate_relevance_score(match, "keyword_match", task_description, keywords)

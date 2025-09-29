@@ -1,5 +1,7 @@
 import textwrap
 
+import pytest
+
 from ai_dev_agent.tools.code.code_edit.context import ContextGatherer, ContextGatheringOptions
 
 
@@ -56,3 +58,33 @@ def test_gather_contexts_discovers_related_test_files(tmp_path):
     assert "src/pkg/module.py" in rel_paths
     assert "tests/test_module.py" in rel_paths
     assert any("test" in reason or reason.startswith("keyword") for reason in rel_paths.values())
+
+
+def test_structure_summary_covers_c_sources_when_tree_sitter_available(tmp_path):
+    pytest.importorskip("tree_sitter_languages")
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+
+    (repo / "src/foo.c").write_text(
+        """
+        int square(int value) {
+            return value * value;
+        }
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    options = ContextGatheringOptions(
+        include_related_files=False,
+        include_structure_summary=True,
+        max_files=5,
+    )
+    gatherer = ContextGatherer(repo, options)
+
+    contexts = gatherer.gather_contexts(["src/foo.c"])
+
+    summary = next((ctx for ctx in contexts if ctx.reason == "project_structure_summary"), None)
+    assert summary is not None
+    assert "function int square(int value)" in summary.content
