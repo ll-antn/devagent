@@ -29,7 +29,7 @@ from ..providers.llm import (
     DEEPSEEK_DEFAULT_BASE_URL,
 )
 from ..engine.planning.planner import Planner
-from ..engine.react.tool_strategy import ToolSelectionStrategy, TaskType
+from ..engine.react.tool_strategy import ToolSelectionStrategy, TaskType, ToolContext as StrategyToolContext
 from ..tools.execution.sandbox import SandboxConfig, SandboxExecutor
 from ..core.utils.config import Settings, load_settings
 from ..core.utils.context_budget import (
@@ -54,6 +54,7 @@ from ..core.utils.tool_utils import (
     SEARCH_TOOLS,
 )
 from ..tools import ToolContext, registry as tool_registry
+from ..tools.code.code_edit.tree_sitter_analysis import extract_symbols_from_outline
 from ..tools.code.code_edit.tree_sitter_analysis import TreeSitterProjectAnalyzer
 
 LOGGER = get_logger(__name__)
@@ -188,6 +189,133 @@ def _prepare_structure_prompt(summary_text: str, *, max_lines: int = 80, max_cha
     if len(compact) > max_chars:
         compact = compact[: max_chars - 3].rstrip() + "..."
     return compact
+
+
+def _get_structure_hints_state(ctx: click.Context) -> Dict[str, Any]:
+    state = ctx.obj.setdefault(
+        "_structure_hints_state",
+        {"symbols": set(), "files": {}, "project_summary": None},
+    )
+
+    symbols = state.get("symbols")
+    if not isinstance(symbols, set):
+        state["symbols"] = set(symbols or [])
+
+    files = state.get("files")
+    if not isinstance(files, dict):
+        state["files"] = {}
+    else:
+        for path, info in list(files.items()):
+            outline = info.get("outline") or []
+            symbols_info = info.get("symbols") or []
+            files[path] = {
+                "outline": list(outline),
+                "symbols": set(symbols_info),
+            }
+            state["symbols"].update(files[path]["symbols"])
+
+    return state
+
+
+def _export_structure_hints_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    files_payload: Dict[str, Any] = {}
+    files = state.get("files", {})
+    for path, info in files.items():
+        outline = list(info.get("outline") or [])
+        symbols = sorted(set(info.get("symbols") or []))
+        files_payload[path] = {
+            "outline": outline[:50],
+            "symbols": symbols[:50],
+        }
+
+    symbols = sorted(set(state.get("symbols") or []))[:100]
+    return {
+        "symbols": symbols,
+        "files": files_payload,
+        "project_summary": state.get("project_summary"),
+    }
+
+
+def _merge_structure_hints_state(state: Dict[str, Any], payload: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(payload, dict):
+        return
+
+    files_state: Dict[str, Any] = state.setdefault("files", {})
+    symbol_set: Set[str] = state.setdefault("symbols", set())
+
+    if "structure_hints" in payload:
+        _merge_structure_hints_state(state, payload.get("structure_hints"))
+
+    summaries = payload.get("summaries") or []
+    for entry in summaries:
+        path = entry.get("path")
+        outline = list(entry.get("outline") or [])
+        if not path:
+            continue
+        symbols = set(extract_symbols_from_outline(outline))
+        files_state[path] = {"outline": outline, "symbols": symbols}
+        symbol_set.update(symbols)
+
+    files_payload = payload.get("files")
+    if isinstance(files_payload, dict):
+        for path, info in files_payload.items():
+            outline = list(info.get("outline") or [])
+            symbols = set(info.get("symbols") or extract_symbols_from_outline(outline))
+            files_state[path] = {"outline": outline, "symbols": symbols}
+            symbol_set.update(symbols)
+
+    symbols_field = payload.get("symbols") or []
+    symbol_set.update(symbols_field)
+
+    project_summary = payload.get("project_summary")
+    if project_summary:
+        state["project_summary"] = project_summary
+
+
+def _update_files_discovered(files_discovered: Set[str], payload: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(payload, dict):
+        return
+
+    for file_entry in payload.get("files", []) or []:
+        path = file_entry.get("path")
+        if path:
+            files_discovered.add(str(path))
+
+    for match in payload.get("matches", []) or []:
+        path = match.get("path")
+        if path:
+            files_discovered.add(str(path))
+
+    for summary in payload.get("summaries", []) or []:
+        path = summary.get("path")
+        if path:
+            files_discovered.add(str(path))
+
+
+def _detect_repository_language(
+    strategy: ToolSelectionStrategy,
+    repo_root: Path,
+    *,
+    max_files: int = 400,
+) -> Tuple[Optional[str], Optional[int]]:
+    file_paths: List[str] = []
+    count = 0
+    try:
+        for path in repo_root.rglob("*"):
+            if count >= max_files:
+                break
+            if path.is_file():
+                count += 1
+                try:
+                    rel = str(path.relative_to(repo_root))
+                except ValueError:
+                    rel = str(path)
+                file_paths.append(rel)
+    except OSError:
+        pass
+
+    language = strategy.detect_language(file_paths)
+    return language, count if count else None
 
 
 def _infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
@@ -331,13 +459,15 @@ def _make_tool_context(ctx: click.Context, *, with_sandbox: bool = False) -> Too
         devagent_cfg = load_devagent_yaml()
         ctx.obj["devagent_config"] = devagent_cfg
 
+    structure_hints_state = _get_structure_hints_state(ctx)
+
     return ToolContext(
         repo_root=Path.cwd(),
         settings=settings,
         sandbox=sandbox,
         devagent_config=devagent_cfg,
         metrics_collector=None,
-        extra={},
+        extra={"structure_hints": _export_structure_hints_state(structure_hints_state)},
     )
 
 
@@ -385,7 +515,7 @@ class RegistryIntent:
     with_sandbox: bool = False
     recovery_handler: Optional[RecoveryHandler] = None
 
-    def __call__(self, ctx: click.Context, arguments: Dict[str, Any]) -> None:
+    def __call__(self, ctx: click.Context, arguments: Dict[str, Any]) -> Mapping[str, Any]:
         payload, context = self.payload_builder(ctx, arguments)
         extras = context or {}
         try:
@@ -400,6 +530,7 @@ class RegistryIntent:
                 raise
             result = self.recovery_handler(ctx, arguments, payload, extras, exc)
         self.result_handler(ctx, arguments, result, extras)
+        return result
 
 
 def _build_code_search_payload(
@@ -1117,6 +1248,20 @@ def _execute_react_assistant(
 
     # Determine task-specific iteration limits based on operation type
     strategy = ToolSelectionStrategy()
+    structure_state = _get_structure_hints_state(ctx)
+    repo_root = Path.cwd()
+    repository_language = ctx.obj.get("_detected_language")
+    repository_size_estimate = ctx.obj.get("_repo_file_count")
+    if repository_language is None or repository_size_estimate is None:
+        detected_language, file_count = _detect_repository_language(strategy, repo_root)
+        if repository_language is None:
+            repository_language = detected_language
+            ctx.obj["_detected_language"] = detected_language
+        if repository_size_estimate is None:
+            repository_size_estimate = file_count
+            ctx.obj["_repo_file_count"] = file_count
+
+    task_keywords = set(extract_keywords(user_prompt)) if user_prompt else set()
     query_lower = user_prompt.lower()
     tool_task_type = strategy.detect_task_type(user_prompt)
 
@@ -1191,6 +1336,8 @@ def _execute_react_assistant(
             if "_project_structure_summary" not in ctx.obj:
                 project_structure = _collect_project_structure_outline(Path.cwd())
                 ctx.obj["_project_structure_summary"] = project_structure
+            if project_structure:
+                structure_state["project_summary"] = project_structure
             planner = Planner(client)
             structured_plan = planner.generate(user_prompt, project_structure=project_structure)
         except LLMError as exc:
@@ -1270,15 +1417,86 @@ def _execute_react_assistant(
         ),
         Message(role="user", content=user_prompt)
     ]
-    
+
+    project_structure = ctx.obj.get("_project_structure_summary")
+    if not project_structure:
+        project_structure = _collect_project_structure_outline(repo_root)
+        if project_structure:
+            ctx.obj["_project_structure_summary"] = project_structure
+    if project_structure:
+        structure_state["project_summary"] = project_structure
+        messages.insert(
+            1,
+            Message(
+                role="system",
+                content="Project structure outline:\n" + project_structure,
+            ),
+        )
+
     iteration = 0
+
+    tool_history: List[str] = []
+    has_symbol_index = False
+    files_discovered: Set[str] = set()
+    last_tool_success = True
 
     while iteration < iteration_cap:
         iteration += 1
-        
+
+        strategy_context = StrategyToolContext(
+            task_type=tool_task_type,
+            language=repository_language,
+            has_symbol_index=has_symbol_index,
+            files_discovered=set(files_discovered),
+            tools_used=list(tool_history),
+            last_tool_success=last_tool_success,
+            iteration_count=iteration - 1,
+            task_keywords=set(task_keywords),
+            repository_size=repository_size_estimate,
+            iteration_budget=iteration_cap,
+        )
+
+        tools_for_iteration = available_tools
+        try:
+            sanitized_to_entry: Dict[str, Dict[str, Any]] = {}
+            sanitized_to_canonical: Dict[str, str] = {}
+
+            for entry in available_tools:
+                fn = entry.get("function", {})
+                sanitized = fn.get("name")
+                if not sanitized:
+                    continue
+                canonical = canonical_tool_name(sanitized)
+                sanitized_to_entry[sanitized] = entry
+                sanitized_to_canonical[sanitized] = canonical
+
+            canonical_available = [canonical for canonical in sanitized_to_canonical.values()]
+            prioritized_canonical = strategy.prioritize_tools(canonical_available, strategy_context)
+
+            prioritized_sanitized: List[str] = []
+            used_sanitized: Set[str] = set()
+            for canonical in prioritized_canonical:
+                for sanitized, mapped in sanitized_to_canonical.items():
+                    if mapped == canonical and sanitized not in used_sanitized:
+                        prioritized_sanitized.append(sanitized)
+                        used_sanitized.add(sanitized)
+                        break
+
+            for sanitized in sanitized_to_entry:
+                if sanitized not in used_sanitized:
+                    prioritized_sanitized.append(sanitized)
+
+            tools_for_iteration = [
+                sanitized_to_entry[name]
+                for name in prioritized_sanitized
+                if name in sanitized_to_entry
+            ] or available_tools
+        except Exception:
+            tools_for_iteration = available_tools
+
         try:
             # Get LLM response with tools
-            result = client.invoke_tools(messages, tools=available_tools, temperature=0.1)
+            result = client.invoke_tools(messages, tools=tools_for_iteration, temperature=0.1)
             
             # Add LLM response to conversation
             assistant_message = Message(
@@ -1338,6 +1556,7 @@ def _execute_react_assistant(
                 start_time = time.time()
                 
                 call_signature = tool_signature(tool_call)
+                canonical_name = canonical_tool_name(tool_call.name)
 
                 # Track tool usage
                 used_tools.add(call_signature)
@@ -1346,6 +1565,7 @@ def _execute_react_assistant(
                 if tool_call.name in FILE_READ_TOOLS:
                     for target in _normalize_read_targets(tool_call.arguments):
                         file_reads.add(target)
+                        files_discovered.add(target)
                 elif tool_call.name in SEARCH_TOOLS and tool_call.arguments.get("query"):
                     search_queries.add(tool_call.arguments["query"])
                 
@@ -1378,11 +1598,12 @@ def _execute_react_assistant(
                 tool_repeat_counts[call_signature] = repeat_count
                 
                 tool_output_for_message = None
+                handler_result: Optional[Mapping[str, Any]] = None
 
                 call_success = False
                 try:
                     with contextlib.redirect_stdout(captured_output):
-                        handler(ctx, tool_call.arguments)
+                        handler_result = handler(ctx, tool_call.arguments)
                     tool_output_raw = captured_output.getvalue()
                     tool_output = tool_output_raw.strip()
                     if not tool_output:
@@ -1463,6 +1684,18 @@ def _execute_react_assistant(
                     tool_call_id=tool_call_id,
                 )
                 messages.append(tool_message)
+
+                if handler_result:
+                    _merge_structure_hints_state(structure_state, handler_result)
+                    _update_files_discovered(files_discovered, handler_result)
+                    if structure_state.get("project_summary"):
+                        ctx.obj["_project_structure_summary"] = structure_state["project_summary"]
+
+                if canonical_name == "symbols.index" and call_success:
+                    has_symbol_index = True
+
+                tool_history.append(canonical_name)
+                last_tool_success = call_success
             
             if consecutive_fails >= 3:
                 click.echo("🚫 Multiple consecutive tool failures. Stopping to avoid loops.")

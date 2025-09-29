@@ -38,3 +38,17 @@ def test_apply_context_rules_uses_relative_threshold() -> None:
     reordered = strategy._apply_context_rules(tools, context)
     assert set(reordered[:3]) == {"symbols.find", "ast.query", "fs.read"}
     assert reordered[-1] == "code.search"
+
+
+def test_prioritize_tools_prefers_ast_for_cpp() -> None:
+    strategy = ToolSelectionStrategy()
+    available = ["code.search", "ast.query", "symbols.find", "fs.read"]
+    context = ToolContext(
+        task_type=TaskType.CODE_EXPLORATION,
+        language="cpp",
+        tools_used=["code.search"],
+    )
+
+    ordered = strategy.prioritize_tools(available, context)
+    assert ordered[0] == "ast.query"
+    assert ordered[1] == "symbols.find"

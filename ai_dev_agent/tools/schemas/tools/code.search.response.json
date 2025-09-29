@@ -13,7 +13,39 @@
           "path": { "type": "string" },
           "line": { "type": "integer", "minimum": 1 },
           "col": { "type": "integer", "minimum": 1 },
-          "preview": { "type": "string" }
+          "preview": { "type": "string" },
+          "structure": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string" },
+              "symbol": { "type": "string" },
+              "depth": { "type": "integer", "minimum": 0 },
+              "line": { "type": "integer", "minimum": 1 },
+              "path": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "ancestors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": { "type": "string" },
+                    "name": { "type": "string" },
+                    "line": { "type": "integer", "minimum": 1 }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "summary": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "structure_summary": { "type": "string" },
+          "import_context": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
         },
         "additionalProperties": false
       }

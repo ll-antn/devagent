@@ -61,8 +61,15 @@ class ContextGatherer:
         self._git_available = self._check_git_available()
         self._structure_analyzer = TreeSitterProjectAnalyzer(repo_root)
         hints = structure_hints or {}
-        self._external_file_outlines: Dict[str, Dict[str, Any]] = dict(hints.get("files") or {})
+        raw_files = dict(hints.get("files") or {})
         self._symbol_hints: Set[str] = set(hints.get("symbols") or [])
+        normalized_files: Dict[str, Dict[str, Any]] = {}
+        for path, info in raw_files.items():
+            outline = list(info.get("outline") or [])
+            symbols = set(info.get("symbols") or [])
+            normalized_files[path] = {"outline": outline, "symbols": symbols}
+            self._symbol_hints.update(symbols)
+        self._external_file_outlines = normalized_files
         self._project_structure_hint: Optional[str] = hints.get("project_summary")
         
     def gather_contexts(
@@ -318,19 +325,24 @@ class ContextGatherer:
 
         outline_info = self._external_file_outlines.get(rel_path)
         outline: Optional[List[str]] = None
+        precomputed_symbols: Optional[Iterable[str]] = None
         if outline_info:
-            outline = outline_info.get("outline")
+            outline = list(outline_info.get("outline") or [])
+            stored_symbols = outline_info.get("symbols")
+            if stored_symbols is not None:
+                precomputed_symbols = list(stored_symbols)
 
         if outline is None:
             outline = self._structure_analyzer.summarize_content(rel_path, context.content)
 
         if outline:
             context.structure_outline = list(outline)
-            context.symbols = extract_symbols_from_outline(outline)
+            symbols_list = list(precomputed_symbols) if precomputed_symbols is not None else extract_symbols_from_outline(outline)
+            context.symbols = symbols_list
             self._symbol_hints.update(context.symbols)
             self._external_file_outlines[rel_path] = {
-                "outline": context.structure_outline,
-                "symbols": context.symbols,
+                "outline": list(context.structure_outline),
+                "symbols": set(context.symbols),
             }
         else:
             context.structure_outline = []

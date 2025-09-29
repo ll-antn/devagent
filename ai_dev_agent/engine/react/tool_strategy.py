@@ -153,6 +153,39 @@ class ToolSelectionStrategy:
         
         # Return best candidate or fallback
         return adjusted_tools[0] if adjusted_tools else "code.search"
+
+    def prioritize_tools(self, available_tools: List[str], context: ToolContext) -> List[str]:
+        """Return *available_tools* re-ordered according to strategy heuristics."""
+
+        if not available_tools:
+            return []
+
+        ordered: List[str] = []
+        seen: Set[str] = set()
+
+        base_priorities = self._get_base_priorities(context)
+        for tool in base_priorities:
+            if tool in available_tools and tool not in seen:
+                ordered.append(tool)
+                seen.add(tool)
+
+        for tool in available_tools:
+            if tool not in seen:
+                ordered.append(tool)
+                seen.add(tool)
+
+        ordered = self._apply_context_rules(ordered, context)
+        ordered = [tool for tool in ordered if tool in available_tools]
+
+        if context.language:
+            ordered = self._apply_language_preferences(ordered, context.language)
+
+        # Ensure every available tool appears in the final ordering
+        for tool in available_tools:
+            if tool not in ordered:
+                ordered.append(tool)
+
+        return ordered
     
     def _get_base_priorities(self, context: ToolContext) -> List[str]:
         """Get base tool priority list for task type."""
