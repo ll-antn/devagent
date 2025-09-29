@@ -24,6 +24,11 @@ TOOL_CANONICAL_SPECS = {
         "aliases": ("fs_read",),
         "category": "file_read",
     },
+    "fs.write_patch": {
+        "display_name": "fs.write_patch",
+        "aliases": ("fs_write_patch",),
+        "category": "command",
+    },
     "code.search": {
         "display_name": "code.search",
         "aliases": ("code_search",),
@@ -37,6 +42,11 @@ TOOL_CANONICAL_SPECS = {
     "symbols.find": {
         "display_name": "symbols.find",
         "aliases": ("symbols_find",),
+        "category": "symbols",
+    },
+    "symbols.index": {
+        "display_name": "symbols.index",
+        "aliases": ("symbols_index",),
         "category": "symbols",
     },
     "exec": {

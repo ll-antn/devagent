@@ -1,13 +1,18 @@
 """Utilities for working with tool identifiers and signatures."""
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence
+import re
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, TypeVar
 
 from .constants import (
     TOOL_ALIAS_TO_CANONICAL,
     TOOL_CANONICAL_CATEGORIES,
     TOOL_DISPLAY_NAMES,
 )
+
+_SANITIZE_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
+
+T = TypeVar("T")
 
 FILE_READ_TOOLS = {
     alias
@@ -20,6 +25,14 @@ SEARCH_TOOLS = {
     for alias, canonical in TOOL_ALIAS_TO_CANONICAL.items()
     if TOOL_CANONICAL_CATEGORIES.get(canonical) == "search"
 }
+
+
+def sanitize_tool_name(tool_name: Optional[str]) -> str:
+    """Return a sanitized identifier safe for LLM tool registration."""
+    if not tool_name:
+        return "tool"
+    sanitized = _SANITIZE_PATTERN.sub("_", tool_name)
+    return sanitized or "tool"
 
 
 def canonical_tool_name(tool_name: Optional[str]) -> str:
@@ -43,6 +56,47 @@ def display_tool_name(tool_name: Optional[str]) -> str:
         return "generic"
     canonical = canonical_tool_name(tool_name)
     return TOOL_DISPLAY_NAMES.get(canonical, canonical)
+
+
+def tool_aliases(tool_name: Optional[str], *, include_canonical: bool = True) -> Tuple[str, ...]:
+    """Return all known aliases for a tool, including the canonical name."""
+
+    canonical = canonical_tool_name(tool_name)
+
+    def _coerce(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return str(value)
+
+    seen: Dict[str, None] = {}
+
+    def _add(candidate: Optional[str]) -> None:
+        name = _coerce(candidate)
+        if not name:
+            return
+        if name not in seen:
+            seen[name] = None
+
+    if include_canonical:
+        _add(canonical)
+
+    _add(tool_name)
+
+    for alias, alias_canonical in TOOL_ALIAS_TO_CANONICAL.items():
+        if alias_canonical == canonical:
+            _add(alias)
+
+    return tuple(seen.keys())
+
+
+def expand_tool_aliases(mapping: Mapping[str, T]) -> Dict[str, T]:
+    """Expand a mapping keyed by tool name to include all aliases."""
+
+    expanded: Dict[str, T] = {}
+    for name, value in mapping.items():
+        for alias in tool_aliases(name):
+            expanded[alias] = value
+    return expanded
 
 
 def build_tool_signature(tool_name: str, arguments: Mapping[str, Any] | None) -> str:
@@ -84,9 +138,12 @@ def tool_signature(tool_call: Any) -> str:
 
 
 __all__ = [
+    "sanitize_tool_name",
     "canonical_tool_name",
     "tool_category",
     "display_tool_name",
+    "tool_aliases",
+    "expand_tool_aliases",
     "build_tool_signature",
     "tool_signature",
     "FILE_READ_TOOLS",

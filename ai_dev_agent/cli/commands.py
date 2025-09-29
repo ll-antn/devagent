@@ -47,6 +47,7 @@ from ..core.utils.state import InMemoryStateStore, StateStore
 from ..core.utils.tool_utils import (
     canonical_tool_name,
     display_tool_name,
+    expand_tool_aliases,
     tool_category,
     tool_signature,
     FILE_READ_TOOLS,
@@ -723,23 +724,7 @@ REGISTRY_INTENTS: Dict[str, RegistryIntent] = {
     ),
 }
 
-INTENT_HANDLERS: Dict[str, Any] = {
-    # Registry-backed intents (synonyms share the same handler instances)
-    "code.search": REGISTRY_INTENTS["code.search"],
-    "code_search": REGISTRY_INTENTS["code.search"],
-    "fs.read": REGISTRY_INTENTS["fs.read"],
-    "fs_read": REGISTRY_INTENTS["fs.read"],
-    "symbols.find": REGISTRY_INTENTS["symbols.find"],
-    "symbols_find": REGISTRY_INTENTS["symbols.find"],
-    "symbols.index": REGISTRY_INTENTS["symbols.index"],
-    "symbols_index": REGISTRY_INTENTS["symbols.index"],
-    "ast.query": REGISTRY_INTENTS["ast.query"],
-    "ast_query": REGISTRY_INTENTS["ast.query"],
-    "exec": REGISTRY_INTENTS["exec"],
-    "execute": REGISTRY_INTENTS["exec"],
-    "fs.write_patch": REGISTRY_INTENTS["fs.write_patch"],
-    "fs_write_patch": REGISTRY_INTENTS["fs.write_patch"],
-}
+INTENT_HANDLERS: Dict[str, RegistryIntent] = expand_tool_aliases(REGISTRY_INTENTS)
 
 
 

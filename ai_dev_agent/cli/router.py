@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import json
-import re
 
 from ai_dev_agent.providers.llm.base import (
     LLMClient,
@@ -14,13 +13,8 @@ from ai_dev_agent.providers.llm.base import (
 )
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.constants import LEGACY_TOOL_NAMES
+from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
 from ai_dev_agent.tools import registry as tool_registry
-
-
-def _sanitize_tool_name(name: str) -> str:
-    """Convert registry tool names into API-safe identifiers."""
-    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-    return sanitized or "tool"
 
 DEFAULT_TOOLS: List[Dict[str, Any]] = []
 
@@ -95,7 +89,7 @@ class IntentRouter:
                 description = (description or "Apply a unified diff") + \
                               " (auto_approve_code is recommended for automated edits)"
 
-            base_name = _sanitize_tool_name(name)
+            base_name = sanitize_tool_name(name)
             safe_name = base_name
             suffix = 1
             if safe_name in LEGACY_TOOL_NAMES:
