@@ -8,94 +8,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-try:  # Avoid hard dependency at import time
-    from tree_sitter import Parser  # type: ignore
-    from tree_sitter_languages import get_language  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    Parser = None  # type: ignore
-    get_language = None  # type: ignore
+from ai_dev_agent.core.tree_sitter import (
+    build_capture_query,
+    ensure_parser,
+    get_ast_query,
+    language_object,
+    node_text,
+    normalise_language,
+    slice_bytes,
+)
 
 from ..registry import ToolSpec, ToolContext, registry
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "tools"
-
-LANGUAGE_BY_SUFFIX = {
-    # Python / JS / TS
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    # C / C++
-    ".c": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cxx": "cpp",
-    ".c++": "cpp",
-    ".hh": "cpp",
-    ".hpp": "cpp",
-    ".hxx": "cpp",
-    # Other popular languages
-    ".java": "java",
-    ".go": "go",
-    ".rs": "rust",
-    ".rb": "ruby",
-    ".cs": "c_sharp",
-    ".php": "php",
-}
-
-# Language detection indicators for ambiguous file extensions
-LANGUAGE_INDICATORS = {
-    "cpp": ["class ", "namespace ", "template<", "std::", "public:", "private:", "virtual ", "override", "using namespace", "::"],
-    "c": ["typedef struct", "#include <stdio.h>", "FILE *", "malloc(", "free(", "printf(", "scanf(", "void main"],
-    "python": ["def ", "class ", "import ", "from ", "__init__", "self.", "@property", "async def", "if __name__"],
-    "javascript": ["function ", "const ", "let ", "var ", "=>", "async function", "export ", "import ", "document.", "window."],
-    "typescript": ["interface ", "type ", "enum ", ": string", ": number", "export interface", "<T>", "as ", ": void"],
-    "java": ["public class", "private ", "protected ", "extends ", "implements ", "package ", "@Override", "public static void main"],
-    "go": ["func ", "package ", "import (", "type ", "struct {", "interface {", "defer ", "go func", "make("],
-    "rust": ["fn ", "impl ", "trait ", "struct ", "enum ", "pub ", "mod ", "use ", "match ", "let mut"],
-    "ruby": ["def ", "class ", "module ", "require ", "attr_", "end\n", "elsif", "@", "puts "],
-    "csharp": ["namespace ", "public class", "private ", "using ", "override ", "async Task", "public static void Main"],
-    "php": ["<?php", "function ", "class ", "$this->", "namespace ", "use ", "trait ", "<?=", "echo "]
-}
-
-def detect_language_from_content(file_path: Path, content: str) -> str:
-    """Smart language detection based on file content and extension."""
-    
-    # First check explicit extensions
-    ext = file_path.suffix.lower()
-    explicit_mappings = {
-        ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "tsx",
-        ".java": "java", ".go": "go", ".rs": "rust", ".rb": "ruby",
-        ".cs": "c_sharp", ".php": "php", ".cpp": "cpp", ".cc": "cpp",
-        ".cxx": "cpp", ".c++": "cpp", ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
-        ".c": "c"
-    }
-    
-    if ext in explicit_mappings:
-        return explicit_mappings[ext]
-    
-    # For ambiguous extensions like .h, analyze content
-    if ext in [".h", ".hpp"]:
-        cpp_score = sum(1 for ind in LANGUAGE_INDICATORS["cpp"] if ind in content)
-        c_score = sum(1 for ind in LANGUAGE_INDICATORS["c"] if ind in content)
-        
-        # If we find strong C++ indicators, it's C++
-        if cpp_score > c_score or cpp_score > 0:
-            return "cpp"
-        return "c"
-    
-    # Fallback: analyze content for any language
-    max_score = 0
-    detected_lang = None
-    content_lower = content.lower()
-    
-    for lang, indicators in LANGUAGE_INDICATORS.items():
-        score = sum(1 for ind in indicators if ind.lower() in content_lower)
-        if score > max_score:
-            max_score = score
-            detected_lang = lang
-    
-    return detected_lang or "text"
 
 
 def validate_query(query: str, language: str) -> tuple[bool, str, str]:
@@ -162,48 +87,71 @@ def validate_query(query: str, language: str) -> tuple[bool, str, str]:
 
 def get_safe_fallback_query(language: str, original_query: str) -> str:
     """Get a safe fallback query for the language when the original fails."""
-    
-    # Default safe queries that should work for most languages
-    safe_queries = {
-        "cpp": "(function_definition) @function",
-        "c": "(function_definition) @function", 
-        "python": "(function_definition) @function",
-        "javascript": "(function_declaration) @function",
-        "typescript": "(function_declaration) @function",
-        "tsx": "(function_declaration) @function",
-        "java": "(method_declaration) @method",
-        "go": "(function_declaration) @function",
-        "rust": "(function_item) @function",
-        "ruby": "(method) @method",
-        "c_sharp": "(method_declaration) @method",
-        "php": "(function_definition) @function"
-    }
-    
-    # Try to infer intent from original query
+
+    language = normalise_language(language)
     original_lower = original_query.lower()
-    
-    if language == "cpp" or language == "c":
+
+    heuristic_templates = []
+
+    if language in {"cpp", "c"}:
         if any(word in original_lower for word in ["class", "struct"]):
-            return "(class_specifier) @class" if language == "cpp" else "(struct_specifier) @struct"
-        elif any(word in original_lower for word in ["method", "member"]):
-            return "(function_definition) @method"
-        elif "namespace" in original_lower:
-            return "(namespace_definition) @namespace"
+            heuristic_templates.append("find_classes" if language == "cpp" else "find_structs")
+        if any(word in original_lower for word in ["namespace", "module"]):
+            heuristic_templates.append("find_namespaces")
+        if any(word in original_lower for word in ["method", "member", "function"]):
+            heuristic_templates.append("find_functions")
     elif language == "python":
         if "class" in original_lower:
-            return "(class_definition) @class"
-        elif "import" in original_lower:
-            return "(import_statement) @import"
-    elif language in ["javascript", "typescript", "tsx"]:
+            heuristic_templates.append("find_classes")
+        if "import" in original_lower:
+            heuristic_templates.append("find_imports")
+        if "async" in original_lower:
+            heuristic_templates.append("find_async")
+        heuristic_templates.append("find_functions")
+    elif language in {"javascript", "typescript", "tsx"}:
         if "class" in original_lower:
-            return "(class_declaration) @class"
-        elif "interface" in original_lower and language in ["typescript", "tsx"]:
-            return "(interface_declaration) @interface"
-        elif "arrow" in original_lower:
-            return "(arrow_function) @arrow_function"
-    
-    # Default fallback
-    return safe_queries.get(language, "(ERROR) @error")
+            heuristic_templates.append("find_classes")
+        if "interface" in original_lower:
+            heuristic_templates.append("find_interfaces")
+        if "export" in original_lower:
+            heuristic_templates.append("find_exports")
+        if "import" in original_lower:
+            heuristic_templates.append("find_imports")
+        if "arrow" in original_lower:
+            heuristic_templates.append("find_arrow_functions")
+        heuristic_templates.append("find_functions")
+    else:
+        heuristic_templates.append("find_functions")
+
+    for template in heuristic_templates:
+        query = get_ast_query(language, template)
+        if query:
+            return query
+
+    default_templates = {
+        "cpp": ("find_functions", "function_definition", "func"),
+        "c": ("find_functions", "function_definition", "func"),
+        "python": ("find_functions", "function_definition", "func"),
+        "javascript": ("find_functions", "function_declaration", "func"),
+        "typescript": ("find_functions", "function_declaration", "func"),
+        "tsx": ("find_functions", "function_declaration", "func"),
+        "java": ("find_methods", "method_declaration", "method"),
+        "go": ("find_functions", "function_declaration", "func"),
+        "rust": ("find_functions", "function_item", "func"),
+        "ruby": ("find_methods", "method", "method"),
+        "csharp": ("find_methods", "method_declaration", "method"),
+        "php": ("find_functions", "function_definition", "func"),
+    }
+
+    template_name, node_type, capture = default_templates.get(language, (None, None, None))
+    if template_name:
+        query = get_ast_query(language, template_name)
+        if query:
+            return query
+    if node_type and capture:
+        return build_capture_query(node_type, capture)
+
+    return "(ERROR) @error"
 
 
 def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, Any]:
@@ -213,82 +161,65 @@ def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str,
     if not target.exists():
         raise FileNotFoundError(rel_path)
 
-    # Defer imports and handle environments without tree-sitter installed
-    if Parser is None or get_language is None:  # pragma: no cover - optional dependency path
+    source = target.read_text(encoding="utf-8", errors="ignore")
+    handle = ensure_parser(target, content=source)
+    if handle is None:  # pragma: no cover - optional dependency path
         return {"nodes": []}
 
-    # Smart language detection using content analysis
-    source = target.read_text(encoding="utf-8", errors="ignore")
-    lang_name = detect_language_from_content(target, source)
-    
-    # Map language names to tree-sitter grammar names
-    grammar_mapping = {
-        "cpp": "cpp",
-        "c": "c",
-        "python": "python", 
-        "javascript": "javascript",
-        "typescript": "typescript",
-        "tsx": "tsx",
-        "java": "java",
-        "go": "go",
-        "rust": "rust",
-        "ruby": "ruby",
-        "c_sharp": "c_sharp",
-        "csharp": "c_sharp",
-        "php": "php"
-    }
-    
-    tree_sitter_lang = grammar_mapping.get(lang_name)
-    if not tree_sitter_lang:
-        # Fallback to suffix-based detection for unsupported content detection
-        suffix = target.suffix
-        tree_sitter_lang = LANGUAGE_BY_SUFFIX.get(suffix)
-        if not tree_sitter_lang:
-            raise ValueError(f"No tree-sitter grammar available for language '{lang_name}' or suffix '{suffix}'")
+    language_name = handle.language
+    language_obj = language_object(language_name)
+    if language_obj is None:  # pragma: no cover - optional dependency path
+        return {"nodes": []}
 
-    try:
-        language = get_language(tree_sitter_lang)
-    except Exception as e:
-        raise ValueError(f"Failed to load tree-sitter grammar for '{tree_sitter_lang}': {e}")
+    parser = handle.parser
+    source_bytes = slice_bytes(source)
+    tree = parser.parse(source_bytes)
 
-    parser = Parser()
-    parser.set_language(language)
-    tree = parser.parse(bytes(source, "utf-8"))
-    
     # Validate and potentially fix the query
     original_query = payload["query"]
-    is_valid, corrected_query, validation_msg = validate_query(original_query, tree_sitter_lang)
-    
+    is_valid, corrected_query, validation_msg = validate_query(original_query, language_name)
+
     if not is_valid:
         # Try fallback query
-        fallback_query = get_safe_fallback_query(tree_sitter_lang, original_query)
+        fallback_query = get_safe_fallback_query(language_name, original_query)
         if fallback_query != "(ERROR) @error":
             corrected_query = fallback_query
             validation_msg = f"Used fallback query '{fallback_query}' due to invalid original: {validation_msg}"
         else:
-            raise ValueError(f"Invalid query '{original_query}' for language '{tree_sitter_lang}': {validation_msg}. If tree-sitter is not installed, try code.search instead.")
-    
+            raise ValueError(
+                f"Invalid query '{original_query}' for language '{language_name}': {validation_msg}. "
+                "If tree-sitter is not installed, try code.search instead."
+            )
+
     try:
-        query = language.query(corrected_query)
+        query = language_obj.query(corrected_query)
     except Exception as e:
         # If corrected query still fails, try fallback
-        fallback_query = get_safe_fallback_query(tree_sitter_lang, original_query)
-        if fallback_query != "(ERROR) @error":
+        fallback_query = get_safe_fallback_query(language_name, original_query)
+        if fallback_query != "(ERROR) @error" and fallback_query != corrected_query:
             try:
-                query = language.query(fallback_query)
+                query = language_obj.query(fallback_query)
                 validation_msg = f"Used fallback query '{fallback_query}' due to parse error: {str(e)}"
+                corrected_query = fallback_query
             except Exception as e2:
-                raise ValueError(f"Both original query '{original_query}' and fallback query '{fallback_query}' failed for language '{tree_sitter_lang}': {str(e2)}. If tree-sitter is not installed, try code.search instead.")
+                raise ValueError(
+                    "Both original query "
+                    f"'{original_query}' and fallback query '{fallback_query}' failed for language "
+                    f"'{language_name}': {str(e2)}. If tree-sitter is not installed, try code.search instead."
+                )
         else:
-            raise ValueError(f"Invalid query '{corrected_query}' for language '{tree_sitter_lang}': {str(e)}. If tree-sitter is not installed, try code.search instead.")
-    
+            raise ValueError(
+                f"Invalid query '{corrected_query}' for language '{language_name}': {str(e)}. "
+                "If tree-sitter is not installed, try code.search instead."
+            )
+
     allowed_captures = set(payload.get("captures") or [])
 
     nodes = []
     for node, capture_name in query.captures(tree.root_node):
         if allowed_captures and capture_name not in allowed_captures:
             continue
-        text = source[node.start_byte : node.end_byte]
+        text = node_text(node, source_bytes)
         start_point = list(node.start_point) if isinstance(node.start_point, tuple) else [node.start_point.row, node.start_point.column]
         end_point = list(node.end_point) if isinstance(node.end_point, tuple) else [node.end_point.row, node.end_point.column]
         nodes.append(
@@ -303,7 +234,7 @@ def _ast_query(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str,
         )
 
     result = {"nodes": nodes}
-    
+
     # Add diagnostic information if query was corrected
     if corrected_query != original_query or "fallback" in validation_msg.lower():
         result["query_diagnostics"] = {

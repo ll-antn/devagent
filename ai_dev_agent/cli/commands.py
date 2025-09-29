@@ -366,6 +366,33 @@ def _handle_code_search_result(
         preview = match.get("preview", "")
         click.echo(f"{path}:{line}:{col} {preview}")
 
+        structure_summary = match.get("structure_summary")
+        if not structure_summary:
+            structure = match.get("structure") or {}
+            summary_parts: List[str] = []
+            path_components = structure.get("path") or []
+            if path_components:
+                summary_parts.append(".".join(path_components))
+            symbol_kind = structure.get("kind")
+            if symbol_kind:
+                summary_parts.append(symbol_kind)
+            depth = structure.get("depth")
+            if depth:
+                summary_parts.append(f"depth {depth}")
+            symbol_line = structure.get("line")
+            if symbol_line:
+                summary_parts.append(f"line {symbol_line}")
+            if summary_parts:
+                structure_summary = "within " + " • ".join(summary_parts)
+
+        if structure_summary:
+            click.echo(f"    structure: {structure_summary}")
+
+        import_context = match.get("import_context") or []
+        if import_context:
+            joined = "; ".join(import_context)
+            click.echo(f"    imports: {joined}")
+
     remaining = len(matches) - len(limited_matches)
     if remaining > 0:
         click.echo(

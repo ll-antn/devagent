@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
+from ai_dev_agent.core.tree_sitter import (
+    build_capture_query,
+    get_ast_query,
+    iter_ast_queries,
+    normalise_language,
+)
+
 
 _DEFAULT_ITERATION_BUDGET = 25
 
@@ -240,131 +247,44 @@ class ToolSelectionStrategy:
         
         return tools
     
-    # Complete AST query templates for all supported languages
-    AST_QUERY_TEMPLATES = {
-        "cpp": {
-            "find_classes": "(class_declaration name: (type_identifier) @name)",
-            "find_functions": "(function_definition declarator: (function_declarator) @func)",
-            "find_methods": "(field_declaration declarator: (function_declarator) @method)",
-            "find_constructors": "(function_definition declarator: (function_declarator declarator: (destructor_name) @ctor))",
-            "find_allocations": "(new_expression type: (_) @type)",
-            "find_templates": "(template_declaration) @template",
-            "find_namespaces": "(namespace_definition name: (identifier) @namespace)",
-        },
-        "c": {
-            "find_functions": "(function_definition declarator: (function_declarator) @func)",
-            "find_structs": "(struct_specifier name: (type_identifier) @name)",
-            "find_typedefs": "(type_definition declarator: (type_identifier) @name)",
-            "find_macros": "(preproc_def name: (identifier) @macro)",
-            "find_enums": "(enum_specifier name: (type_identifier) @name)",
-        },
-        "python": {
-            "find_classes": "(class_definition name: (identifier) @name)",
-            "find_functions": "(function_definition name: (identifier) @name)",
-            "find_methods": "(function_definition name: (identifier) @method)",
-            "find_decorators": "(decorator) @decorator",
-            "find_imports": "(import_statement) @import",
-            "find_async": "(function_definition (async) @async)",
-        },
-        "javascript": {
-            "find_functions": "(function_declaration name: (identifier) @name)",
-            "find_arrow_functions": "(arrow_function) @arrow",
-            "find_classes": "(class_declaration name: (identifier) @name)",
-            "find_methods": "(method_definition key: (property_identifier) @name)",
-            "find_imports": "(import_statement) @import",
-            "find_exports": "(export_statement) @export",
-            "find_async": "(function_declaration (async) @async)",
-        },
-        "typescript": {
-            "find_interfaces": "(interface_declaration name: (type_identifier) @name)",
-            "find_types": "(type_alias_declaration name: (type_identifier) @name)",
-            "find_enums": "(enum_declaration name: (identifier) @name)",
-            "find_functions": "(function_declaration name: (identifier) @name)",
-            "find_classes": "(class_declaration name: (type_identifier) @name)",
-            "find_generics": "(type_parameters) @generics",
-        },
-        "java": {
-            "find_classes": "(class_declaration name: (identifier) @name)",
-            "find_interfaces": "(interface_declaration name: (identifier) @name)",
-            "find_methods": "(method_declaration name: (identifier) @name)",
-            "find_fields": "(field_declaration declarator: (variable_declarator name: (identifier) @name))",
-            "find_annotations": "(annotation) @annotation",
-            "find_enums": "(enum_declaration name: (identifier) @name)",
-        },
-        "go": {
-            "find_functions": "(function_declaration name: (identifier) @name)",
-            "find_methods": "(method_declaration name: (field_identifier) @name)",
-            "find_structs": "(type_spec name: (type_identifier) @name type: (struct_type))",
-            "find_interfaces": "(type_spec name: (type_identifier) @name type: (interface_type))",
-            "find_imports": "(import_declaration) @import",
-        },
-        "rust": {
-            "find_functions": "(function_item name: (identifier) @name)",
-            "find_structs": "(struct_item name: (type_identifier) @name)",
-            "find_enums": "(enum_item name: (type_identifier) @name)",
-            "find_traits": "(trait_item name: (type_identifier) @name)",
-            "find_impls": "(impl_item) @impl",
-            "find_macros": "(macro_invocation macro: (identifier) @name)",
-        },
-        "ruby": {
-            "find_classes": "(class name: (constant) @name)",
-            "find_modules": "(module name: (constant) @name)",
-            "find_methods": "(method name: (identifier) @name)",
-            "find_blocks": "(block) @block",
-            "find_requires": "(call method: (identifier) @req (#eq? @req \"require\"))",
-        },
-        "csharp": {
-            "find_classes": "(class_declaration name: (identifier) @name)",
-            "find_interfaces": "(interface_declaration name: (identifier) @name)",
-            "find_methods": "(method_declaration name: (identifier) @name)",
-            "find_properties": "(property_declaration name: (identifier) @name)",
-            "find_namespaces": "(namespace_declaration name: (_) @name)",
-        },
-        "php": {
-            "find_classes": "(class_declaration name: (name) @name)",
-            "find_functions": "(function_definition name: (name) @name)",
-            "find_methods": "(method_declaration name: (name) @name)",
-            "find_traits": "(trait_declaration name: (name) @name)",
-            "find_namespaces": "(namespace_definition name: (namespace_name) @name)",
-        }
-    }
-
     def get_safe_ast_query(self, language: str, intent: str) -> str:
         """Get a safe, validated AST query for the language and intent."""
-        
-        # Normalize language name
-        lang_map = {
-            "c++": "cpp", "c#": "csharp", "c-sharp": "csharp",
-            "typescript": "typescript", "ts": "typescript",
-            "javascript": "javascript", "js": "javascript"
-        }
-        language = lang_map.get(language.lower(), language.lower())
-        
-        # Find matching query template
-        lang_templates = self.AST_QUERY_TEMPLATES.get(language, {})
-        
-        # Match intent to template
+        if not language:
+            return "(ERROR) @error"
+
+        language = normalise_language(language)
         intent_lower = intent.lower()
-        for template_key, query in lang_templates.items():
-            if any(keyword in intent_lower for keyword in template_key.split("_")[1:]):
+
+        for template_name, query in iter_ast_queries(language):
+            keywords = template_name.split("_")[1:] or [template_name]
+            if any(keyword in intent_lower for keyword in keywords):
                 return query
-        
-        # Default safe queries per language
+
+        # Default safe queries per language fall back to a capture of common constructs
         defaults = {
-            "cpp": "(class_declaration) @class",
-            "c": "(function_definition) @func",
-            "python": "(class_definition) @class",
-            "javascript": "(function_declaration) @func",
-            "typescript": "(interface_declaration) @interface",
-            "java": "(class_declaration) @class",
-            "go": "(function_declaration) @func",
-            "rust": "(function_item) @func",
-            "ruby": "(method) @method",
-            "csharp": "(class_declaration) @class",
-            "php": "(class_declaration) @class"
+            "cpp": ("find_functions", "function_definition", "func"),
+            "c": ("find_functions", "function_definition", "func"),
+            "python": ("find_functions", "function_definition", "func"),
+            "javascript": ("find_functions", "function_declaration", "func"),
+            "typescript": ("find_functions", "function_declaration", "func"),
+            "tsx": ("find_functions", "function_declaration", "func"),
+            "java": ("find_classes", "class_declaration", "class"),
+            "go": ("find_functions", "function_declaration", "func"),
+            "rust": ("find_functions", "function_item", "func"),
+            "ruby": ("find_methods", "method", "method"),
+            "csharp": ("find_classes", "class_declaration", "class"),
+            "php": ("find_functions", "function_definition", "func"),
         }
-        
-        return defaults.get(language, "(ERROR) @error")
+
+        default_template = defaults.get(language)
+        if default_template:
+            template_name, node_type, capture = default_template
+            template_query = get_ast_query(language, template_name)
+            if template_query:
+                return template_query
+            return build_capture_query(node_type, capture)
+
+        return "(ERROR) @error"
 
     def get_tool_hints(self, tool: str, context: ToolContext) -> Dict[str, any]:
         """Provide optimization hints for specific tool usage."""

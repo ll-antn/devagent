@@ -4,25 +4,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
+from ai_dev_agent.core.tree_sitter import (
+    EXTENSION_LANGUAGE_MAP,
+    MANAGER as TREE_SITTER_MANAGER,
+    ensure_parser,
+    node_text,
+    slice_bytes,
+)
 from ai_dev_agent.core.utils.logger import get_logger
 
 LOGGER = get_logger(__name__)
 
-try:  # pragma: no cover - exercised indirectly when dependency available
-    from tree_sitter_languages import (  # type: ignore
-        get_language as _get_language,
-        get_parser as _get_parser,
-    )
-except ImportError:  # pragma: no cover - graceful degradation when not installed
-    _get_language = None
-    _get_parser = None
-
-try:  # pragma: no cover - we only reference when tree-sitter is installed
-    from tree_sitter import Parser as _TreeSitterParser  # type: ignore
-except ImportError:  # pragma: no cover - degrade gracefully
-    _TreeSitterParser = None
+_SUPPORTED_LANGUAGES = {"python", "typescript", "tsx", "javascript", "c", "cpp"}
+_SUPPORTED_SUFFIXES = tuple(
+    suffix for suffix, language in EXTENSION_LANGUAGE_MAP.items() if language in _SUPPORTED_LANGUAGES
+)
 
 
 @dataclass
@@ -41,42 +39,18 @@ class ParsedFileSummary:
 class TreeSitterProjectAnalyzer:
     """Generate structural summaries for source files using tree-sitter."""
 
-    SUPPORTED_SUFFIXES: Dict[str, str] = {
-        ".py": "python",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".js": "javascript",
-        ".c": "c",
-        ".h": "c",
-        ".cpp": "cpp",
-        ".cc": "cpp",
-        ".cxx": "cpp",
-        ".hpp": "cpp",
-        ".hh": "cpp",
-        ".hxx": "cpp",
-    }
+    SUPPORTED_LANGUAGES = _SUPPORTED_LANGUAGES
+    SUPPORTED_SUFFIXES = _SUPPORTED_SUFFIXES
 
     def __init__(self, repo_root: Path, max_files: int = 8, max_lines_per_file: int = 12) -> None:
         self.repo_root = repo_root
-        self._parser_factory = _get_parser
-        self._language_factory = _get_language
-        self._parser_class = _TreeSitterParser
-        self._parsers: Dict[str, object] = {}
+        self._manager = TREE_SITTER_MANAGER
         self.max_files = max_files
         self.max_lines_per_file = max_lines_per_file
-        self._available = self._has_parser_support()
+        self._available = self._manager.available
 
         if not self._available:
             LOGGER.debug("tree-sitter support not available; project summaries disabled")
-        else:
-            probe_language = self.SUPPORTED_SUFFIXES.get(".py")
-            if probe_language:
-                parser = self._create_parser(probe_language)
-                if parser is None:
-                    self._available = False
-                    LOGGER.debug("tree-sitter parser initialization failed; summaries disabled")
-                else:
-                    self._parsers[probe_language] = parser
 
     @property
     def available(self) -> bool:
@@ -84,7 +58,20 @@ class TreeSitterProjectAnalyzer:
 
     @property
     def supported_suffixes(self) -> List[str]:
-        return list(self.SUPPORTED_SUFFIXES.keys())
+        return list(self.SUPPORTED_SUFFIXES)
+
+    def _get_parser_for_suffix(self, suffix: str):
+        """Compatibility shim for existing tests relying on the old API."""
+
+        if not self.available:
+            return None
+
+        language = EXTENSION_LANGUAGE_MAP.get(suffix)
+        if language not in self.SUPPORTED_LANGUAGES:
+            return None
+
+        handle = self._manager.parser_for_language(language)
+        return None if handle is None else handle.parser
 
     def build_project_summary(self, file_entries: Iterable[Tuple[str, str]]) -> Optional[str]:
         """Return a markdown summary describing the structure of the provided files."""
@@ -94,16 +81,15 @@ class TreeSitterProjectAnalyzer:
         summaries: List[ParsedFileSummary] = []
 
         for rel_path, content in file_entries:
-            suffix = Path(rel_path).suffix
-            parser = self._get_parser_for_suffix(suffix)
-            if parser is None:
+            path = Path(rel_path)
+            abs_path = (self.repo_root / path).resolve()
+
+            handle = ensure_parser(abs_path, content=content)
+            if handle is None or handle.language not in self.SUPPORTED_LANGUAGES:
                 continue
 
-            try:
-                source_bytes = content.encode("utf-8", errors="ignore")
-            except UnicodeEncodeError:
-                LOGGER.debug("Skipping non-UTF8 encodable file for summary: %s", rel_path)
-                continue
+            parser = handle.parser
+            source_bytes = slice_bytes(content)
 
             try:
                 tree = parser.parse(source_bytes)  # type: ignore[attr-defined]
@@ -111,7 +97,7 @@ class TreeSitterProjectAnalyzer:
                 LOGGER.debug("tree-sitter failed to parse %s: %s", rel_path, exc)
                 continue
 
-            outline = self._summarize_file(Path(rel_path), suffix, tree, source_bytes)
+            outline = self._summarize_file(path, handle.language, tree, source_bytes)
             if outline:
                 summaries.append(ParsedFileSummary(rel_path, outline[: self.max_lines_per_file]))
 
@@ -135,54 +121,17 @@ class TreeSitterProjectAnalyzer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _has_parser_support(self) -> bool:
-        if self._parser_factory is not None:
-            return True
-        return self._language_factory is not None and self._parser_class is not None
+    def _summarize_file(self, path: Path, language_or_suffix: str, tree, source_bytes: bytes) -> List[str]:
+        language = language_or_suffix
+        if language.startswith('.'):
+            language = EXTENSION_LANGUAGE_MAP.get(language, language.lstrip('.'))
 
-    def _get_parser_for_suffix(self, suffix: str):
-        language = self.SUPPORTED_SUFFIXES.get(suffix)
-        if not language or not self.available:
-            return None
-
-        if language in self._parsers:
-            return self._parsers[language]
-
-        parser = self._create_parser(language)
-        if parser is None:
-            return None
-
-        self._parsers[language] = parser
-        return parser
-
-    def _create_parser(self, language: str):
-        if self._parser_factory is not None:
-            try:
-                return self._parser_factory(language)
-            except Exception as exc:  # pragma: no cover - defensive guard
-                LOGGER.debug("Failed to load tree-sitter parser for %s via factory: %s", language, exc)
-
-        if self._parser_class is not None and self._language_factory is not None:
-            try:
-                lang_obj = self._language_factory(language)
-                if lang_obj is None:
-                    return None
-                parser = self._parser_class()
-                parser.set_language(lang_obj)
-                return parser
-            except Exception as exc:  # pragma: no cover - defensive guard
-                LOGGER.debug("Failed to configure parser for %s via set_language: %s", language, exc)
-
-        return None
-
-    def _summarize_file(self, path: Path, suffix: str, tree, source_bytes: bytes) -> List[str]:
-        if suffix == ".py":
+        if language == "python":
             return self._summarize_python(tree, source_bytes)
-        if suffix in {".ts", ".tsx"}:
+        if language in {"typescript", "tsx"}:
             return self._summarize_typescript(tree, source_bytes)
-        if suffix == ".js":
+        if language == "javascript":
             return self._summarize_javascript(tree, source_bytes)
-        language = self.SUPPORTED_SUFFIXES.get(suffix)
         if language in {"c", "cpp"}:
             return self._summarize_c_cpp(tree, source_bytes, language=language)
         # TODO: extend support for other languages as needed
@@ -773,8 +722,7 @@ class TreeSitterProjectAnalyzer:
     def _node_text(self, node, source_bytes: bytes) -> str:
         if node is None:
             return ""
-        text = source_bytes[node.start_byte : node.end_byte]
-        return text.decode("utf-8", errors="ignore")
+        return node_text(node, source_bytes)
 
     def _clean_signature(self, signature: str) -> str:
         signature = signature.strip()
