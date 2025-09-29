@@ -66,7 +66,7 @@ def test_infer_task_files_from_path_hints(tmp_path: Path) -> None:
     assert inferred == ["docs/guide.md"]
 
 
-def test_cli_natural_language_directory_listing(monkeypatch, tmp_path: Path) -> None:
+def test_cli_rejects_deprecated_list_directory_tool(monkeypatch, tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     (repo_root / "sample.txt").write_text("hello", encoding="utf-8")
@@ -96,8 +96,8 @@ def test_cli_natural_language_directory_listing(monkeypatch, tmp_path: Path) -> 
     runner = CliRunner()
     result = runner.invoke(cli, ["покажи", "содержимое", "директории"])
 
-    assert result.exit_code == 0, result.output
-    assert "list_directory is deprecated" in result.output
+    assert result.exit_code == 1
+    assert "Intent tool 'list_directory' is not supported yet." in result.output
 
 
 def test_query_command_invokes_router(monkeypatch, tmp_path: Path) -> None:

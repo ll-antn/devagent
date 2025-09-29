@@ -210,17 +210,6 @@ def _update_task_state(
     store.save(snapshot)
 
 
-
-def _deprecated_intent_handler(tool_name: str, guidance: str) -> Callable[[click.Context, Dict[str, Any]], None]:
-    message = f"❌ {tool_name} is deprecated. {guidance}"
-
-    def _handler(_: click.Context, __: Dict[str, Any]) -> None:
-        click.echo(message)
-
-    return _handler
-
-
-
 # ------------------------------- Sandbox helpers ---------------------------------------
 
 
@@ -735,14 +724,6 @@ REGISTRY_INTENTS: Dict[str, RegistryIntent] = {
 }
 
 INTENT_HANDLERS: Dict[str, Any] = {
-    "list_directory": _deprecated_intent_handler(
-        "list_directory",
-        "Use 'exec' with an 'ls' command instead. Example: exec cmd='ls -la path/to/dir'",
-    ),
-    "respond_directly": _deprecated_intent_handler(
-        "respond_directly",
-        "Direct responses are emitted without a tool call; no handler is required.",
-    ),
     # Registry-backed intents (synonyms share the same handler instances)
     "code.search": REGISTRY_INTENTS["code.search"],
     "code_search": REGISTRY_INTENTS["code.search"],
