@@ -159,10 +159,35 @@ def _collect_project_structure_outline(
         return None
 
     try:
-        return analyzer.build_project_summary(file_entries)
+        summary_text = analyzer.build_project_summary(file_entries)
     except Exception as exc:  # pragma: no cover - defensive guard
         LOGGER.debug("Failed to build project structure summary: %s", exc)
         return None
+
+    if not summary_text:
+        return None
+
+    return _prepare_structure_prompt(summary_text)
+
+
+def _prepare_structure_prompt(summary_text: str, *, max_lines: int = 80, max_chars: int = 4000) -> str:
+    """Compress a markdown structure outline for planner prompts."""
+
+    lines = []
+    for raw_line in summary_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+        if len(lines) >= max_lines:
+            break
+
+    compact = "\n".join(lines).strip()
+    if len(compact) > max_chars:
+        compact = compact[: max_chars - 3].rstrip() + "..."
+    return compact
 
 
 def _infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:

@@ -7,10 +7,10 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from ai_dev_agent.core.utils.logger import get_logger
-from .tree_sitter_analysis import TreeSitterProjectAnalyzer
+from .tree_sitter_analysis import TreeSitterProjectAnalyzer, extract_symbols_from_outline
 
 LOGGER = get_logger(__name__)
 
@@ -21,6 +21,8 @@ class FileContext:
     content: str
     relevance_score: float = 0.0
     reason: str = "explicitly_requested"
+    structure_outline: List[str] = field(default_factory=list)
+    symbols: List[str] = field(default_factory=list)
     size_bytes: int = field(default=0, init=False)
     
     def __post_init__(self):
@@ -48,11 +50,20 @@ class ContextGatheringOptions:
 class ContextGatherer:
     """Intelligent context gathering with file discovery heuristics."""
     
-    def __init__(self, repo_root: Path, options: Optional[ContextGatheringOptions] = None):
+    def __init__(
+        self,
+        repo_root: Path,
+        options: Optional[ContextGatheringOptions] = None,
+        structure_hints: Optional[Dict[str, Any]] = None,
+    ):
         self.repo_root = repo_root
         self.options = options or ContextGatheringOptions()
         self._git_available = self._check_git_available()
         self._structure_analyzer = TreeSitterProjectAnalyzer(repo_root)
+        hints = structure_hints or {}
+        self._external_file_outlines: Dict[str, Dict[str, Any]] = dict(hints.get("files") or {})
+        self._symbol_hints: Set[str] = set(hints.get("symbols") or [])
+        self._project_structure_hint: Optional[str] = hints.get("project_summary")
         
     def gather_contexts(
         self, 
@@ -63,24 +74,29 @@ class ContextGatherer:
         """Gather file contexts with intelligent discovery."""
         requested_files = set(files)
         all_contexts = {}
-        
+        symbol_hints: Set[str] = set(self._symbol_hints)
+
         # Start with explicitly requested files
         for rel_path in requested_files:
             try:
                 context = self._load_file_context(rel_path, "explicitly_requested", 1.0)
                 if context:
+                    if context.symbols:
+                        symbol_hints.update(context.symbols)
                     all_contexts[rel_path] = context
             except Exception as exc:
                 LOGGER.warning("Failed to load requested file %s: %s", rel_path, exc)
-        
+
         # Discover additional relevant files
         if self.options.include_related_files:
-            discovered = self._discover_related_files(requested_files, task_description, keywords)
+            discovered = self._discover_related_files(requested_files, task_description, keywords, symbol_hints)
             for rel_path, reason, score in discovered:
                 if rel_path not in all_contexts:
                     try:
                         context = self._load_file_context(rel_path, reason, score)
                         if context:
+                            if context.symbols:
+                                symbol_hints.update(context.symbols)
                             all_contexts[rel_path] = context
                     except Exception as exc:
                         LOGGER.debug("Failed to load discovered file %s: %s", rel_path, exc)
@@ -95,6 +111,7 @@ class ContextGatherer:
 
         contexts.sort(key=lambda c: c.relevance_score, reverse=True)
 
+        self._symbol_hints = symbol_hints
         return self._apply_size_limits(contexts)
     
     def search_files(self, pattern: str, file_types: Optional[List[str]] = None) -> List[str]:
@@ -115,15 +132,15 @@ class ContextGatherer:
                 if file_types:
                     for ft in file_types:
                         cmd.extend(["--", f"*.{ft}"])
-                
+
                 result = subprocess.run(
-                    cmd, 
-                    cwd=self.repo_root, 
-                    capture_output=True, 
-                    text=True, 
-                    timeout=10
+                    cmd,
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
-                
+
                 if result.returncode == 0:
                     for line in result.stdout.strip().split('\n'):
                         if ':' in line:
@@ -134,7 +151,9 @@ class ContextGatherer:
                                 results.append((file_path, line_num))
             except Exception as exc:
                 LOGGER.debug("Git grep failed: %s", exc)
-        
+        else:
+            results.extend(self._fallback_symbol_references(pattern, file_types))
+
         return results
     
     def find_related_files(self, file_path: str) -> List[Tuple[str, str]]:
@@ -163,10 +182,11 @@ class ContextGatherer:
         return related
     
     def _discover_related_files(
-        self, 
-        base_files: Set[str], 
-        task_description: Optional[str], 
-        keywords: Optional[List[str]]
+        self,
+        base_files: Set[str],
+        task_description: Optional[str],
+        keywords: Optional[List[str]],
+        symbol_hints: Optional[Set[str]] = None,
     ) -> List[Tuple[str, str, float]]:
         """Discover files related to the base set."""
         discovered = []
@@ -206,7 +226,17 @@ class ContextGatherer:
                         score = self._calculate_relevance_score(match, "keyword_match", task_description, keywords)
                         if score > 0.2:
                             discovered.append((match, f"keyword_match({keyword})", score))
-        
+
+        if symbol_hints:
+            for symbol in list(symbol_hints)[:12]:
+                references = self.find_symbol_references(symbol)
+                for ref_path, _ in references[:10]:
+                    if ref_path in base_files:
+                        continue
+                    score = self._calculate_relevance_score(ref_path, "symbol_reference", task_description, keywords)
+                    if score > 0.15:
+                        discovered.append((ref_path, "symbol_reference", score))
+
         return discovered
     
     def _calculate_relevance_score(
@@ -224,6 +254,7 @@ class ContextGatherer:
             "sibling_file": 0.5,
             "config_file": 0.4,
             "keyword_match": 0.6,
+            "symbol_reference": 0.65,
         }.get(reason, 0.3)
         
         # Boost score based on file type and task
@@ -254,26 +285,57 @@ class ContextGatherer:
     def _load_file_context(self, rel_path: str, reason: str, score: float) -> Optional[FileContext]:
         """Load a single file context."""
         full_path = (self.repo_root / rel_path).resolve()
-        
+
         if not full_path.exists():
             LOGGER.debug("File not found: %s", rel_path)
             return None
-        
+
         if not self._should_include_file(full_path):
             return None
-        
+
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
-            return FileContext(
+            context = FileContext(
                 path=full_path,
                 content=content,
                 relevance_score=score,
-                reason=reason
+                reason=reason,
             )
+            self._attach_structure_metadata(context)
+            return context
         except Exception as exc:
             LOGGER.warning("Failed to read file %s: %s", rel_path, exc)
             return None
-    
+
+    def _attach_structure_metadata(self, context: FileContext) -> None:
+        if not self._structure_analyzer.available:
+            return
+
+        try:
+            rel_path = str(context.path.relative_to(self.repo_root))
+        except ValueError:
+            return
+
+        outline_info = self._external_file_outlines.get(rel_path)
+        outline: Optional[List[str]] = None
+        if outline_info:
+            outline = outline_info.get("outline")
+
+        if outline is None:
+            outline = self._structure_analyzer.summarize_content(rel_path, context.content)
+
+        if outline:
+            context.structure_outline = list(outline)
+            context.symbols = extract_symbols_from_outline(outline)
+            self._symbol_hints.update(context.symbols)
+            self._external_file_outlines[rel_path] = {
+                "outline": context.structure_outline,
+                "symbols": context.symbols,
+            }
+        else:
+            context.structure_outline = []
+            context.symbols = []
+
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if file should be included based on patterns and size."""
         rel_path = str(file_path.relative_to(self.repo_root))
@@ -418,7 +480,17 @@ class ContextGatherer:
         if not self._structure_analyzer.available:
             return None
 
+        if self._project_structure_hint:
+            synthetic_path = (self.repo_root / "__project_structure__.md").resolve()
+            return FileContext(
+                path=synthetic_path,
+                content=self._project_structure_hint,
+                relevance_score=0.98,
+                reason="project_structure_summary",
+            )
+
         entries: List[Tuple[str, str]] = []
+        outlines: List[Tuple[str, List[str]]] = []
 
         for context in contexts:
             try:
@@ -431,19 +503,39 @@ class ContextGatherer:
 
             entries.append((rel_path, context.content))
 
+            if context.structure_outline:
+                outlines.append((rel_path, context.structure_outline[: self._structure_analyzer.max_lines_per_file]))
+
         if not entries:
             return None
 
-        summary_text = self._structure_analyzer.build_project_summary(entries)
+        summary_text: Optional[str] = None
+        if outlines:
+            lines: List[str] = [
+                "# Project Structure (Tree-sitter)",
+                "",
+                "Generated outline of relevant files to help the language model navigate the codebase.",
+                "",
+            ]
+            for rel_path, outline in outlines:
+                lines.append(f"### {rel_path}")
+                lines.extend(outline)
+                lines.append("")
+            summary_text = "\n".join(lines).strip()
+
+        if not summary_text:
+            summary_text = self._structure_analyzer.build_project_summary(entries)
+
         if not summary_text:
             return None
 
+        self._project_structure_hint = summary_text
         synthetic_path = (self.repo_root / "__project_structure__.md").resolve()
         return FileContext(
             path=synthetic_path,
             content=summary_text,
             relevance_score=0.98,
-            reason="project_structure_summary"
+            reason="project_structure_summary",
         )
 
     def _find_config_files(self, file_path: Path) -> List[str]:
@@ -530,7 +622,7 @@ class ContextGatherer:
     def _fallback_search(self, pattern: str, file_types: Optional[List[str]] = None) -> List[str]:
         """Fallback search using file system traversal."""
         matches = []
-        
+
         try:
             for root, dirs, files in os.walk(self.repo_root):
                 # Skip common ignore patterns
@@ -557,9 +649,44 @@ class ContextGatherer:
                     
         except Exception as exc:
             LOGGER.debug("Fallback search failed: %s", exc)
-        
+
         return matches
-    
+
+    def _fallback_symbol_references(
+        self, pattern: str, file_types: Optional[List[str]] = None
+    ) -> List[Tuple[str, int]]:
+        """Approximate symbol reference search when git is unavailable."""
+
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            return []
+
+        results: List[Tuple[str, int]] = []
+
+        try:
+            for root, dirs, files in os.walk(self.repo_root):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'node_modules'}]
+
+                for file in files:
+                    if file_types and not any(file.endswith(f'.{ft}') for ft in file_types):
+                        continue
+
+                    file_path = Path(root) / file
+                    try:
+                        with file_path.open('r', encoding='utf-8', errors='ignore') as handle:
+                            for idx, line in enumerate(handle, start=1):
+                                if regex.search(line):
+                                    rel_path = str(file_path.relative_to(self.repo_root))
+                                    results.append((rel_path, idx))
+                                    break
+                    except (OSError, UnicodeDecodeError):
+                        continue
+        except Exception as exc:
+            LOGGER.debug("Fallback symbol reference search failed: %s", exc)
+
+        return results
+
     def _check_git_available(self) -> bool:
         """Check if git is available and we're in a git repo."""
         try:

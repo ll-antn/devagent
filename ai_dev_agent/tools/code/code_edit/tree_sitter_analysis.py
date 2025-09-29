@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from ai_dev_agent.core.tree_sitter import (
     EXTENSION_LANGUAGE_MAP,
@@ -773,4 +773,55 @@ class TreeSitterProjectAnalyzer:
         return text[: limit - 1].rstrip() + "…"
 
 
-__all__ = ["TreeSitterProjectAnalyzer"]
+SYMBOL_KINDS = {
+    "function",
+    "method",
+    "class",
+    "interface",
+    "struct",
+    "enum",
+    "module",
+    "namespace",
+    "trait",
+    "impl",
+    "component",
+}
+
+
+def extract_symbols_from_outline(outline: Sequence[str]) -> List[str]:
+    """Extract symbol identifiers from a tree-sitter outline."""
+
+    symbols: List[str] = []
+    seen = set()
+
+    for line in outline:
+        snippet = line.strip()
+        if not snippet.startswith("-"):
+            continue
+        snippet = snippet[1:].strip()
+        if not snippet:
+            continue
+        parts = snippet.split()
+        if not parts:
+            continue
+        kind = parts[0].lower()
+        if kind not in SYMBOL_KINDS:
+            continue
+        if len(parts) < 2:
+            continue
+        candidate = parts[1]
+        # Remove trailing punctuation like (), :, {, etc.
+        candidate = candidate.split("(", 1)[0]
+        candidate = candidate.strip("():{}[]<>")
+        if not candidate or any(ch in candidate for ch in "- "):
+            continue
+        if candidate.lower() in {"self", "cls", "this"}:
+            continue
+        if candidate not in seen:
+            seen.add(candidate)
+            symbols.append(candidate)
+
+    return symbols
+
+
+__all__ = ["TreeSitterProjectAnalyzer", "ParsedFileSummary", "extract_symbols_from_outline"]

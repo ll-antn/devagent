@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from ai_dev_agent.tools.code.code_edit.editor import CodeEditor
 from ai_dev_agent.engine.react.pipeline import PipelineCommands
@@ -13,6 +13,7 @@ from ai_dev_agent.core.utils.devagent_config import DevAgentConfig, load_devagen
 from ai_dev_agent.core.utils.logger import get_logger
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.engine.metrics import MetricsCollector
+from ai_dev_agent.tools.code.code_edit.tree_sitter_analysis import extract_symbols_from_outline
 from .types import ActionRequest, Observation
 
 LOGGER = get_logger(__name__)
@@ -40,6 +41,11 @@ class RegistryToolInvoker:
         self.collector = collector
         self.pipeline_commands = pipeline_commands
         self.devagent_cfg = devagent_cfg or load_devagent_yaml()
+        self._structure_hints: Dict[str, Any] = {
+            "symbols": set(),
+            "files": {},
+            "project_summary": None,
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -90,6 +96,7 @@ class RegistryToolInvoker:
                 "code_editor": self.code_editor,
                 "test_runner": self.test_runner,
                 "pipeline_commands": self.pipeline_commands,
+                "structure_hints": self._export_structure_hints(),
             },
         )
         return registry.invoke(tool_name, payload, ctx)
@@ -137,10 +144,23 @@ class RegistryToolInvoker:
             metrics = {"definitions": len(defs)}
             artifacts = [entry.get("path") for entry in defs if entry.get("path")]
         elif tool_name == "ast.query":
-            nodes = result.get("nodes", [])
-            outcome = f"Matched {len(nodes)} node(s)"
-            metrics = {"nodes": len(nodes)}
-            raw_output = json.dumps(nodes[:10], indent=2)
+            mode = result.get("mode", "query")
+            if mode == "summary":
+                summaries = result.get("summaries", [])
+                outcome = f"Summarised {len(summaries)} file(s)"
+                metrics = {"summaries": len(summaries)}
+                project_summary = result.get("project_summary")
+                preview = {
+                    "summaries": summaries[:5],
+                    "project_summary": project_summary,
+                }
+                raw_output = json.dumps(preview, indent=2)
+                self._update_structure_hints_from_summary(summaries, project_summary)
+            else:
+                nodes = result.get("nodes", [])
+                outcome = f"Matched {len(nodes)} node(s)"
+                metrics = {"nodes": len(nodes)}
+                raw_output = json.dumps(nodes[:10], indent=2)
         elif tool_name == "exec":
             exit_code = result.get("exit_code", 0)
             success = exit_code == 0
@@ -160,14 +180,59 @@ class RegistryToolInvoker:
             metrics = dict(result)
             raw_output = json.dumps(result, indent=2)
 
-        return Observation(
+        observations_kwargs: Dict[str, Any] = {
             success=success,
             outcome=outcome,
             metrics=metrics,
             artifacts=[item for item in artifacts if item],
             tool=tool_name,
             raw_output=raw_output,
-        )
+        }
+
+        structure_payload = self._export_structure_hints()
+        if structure_payload["symbols"] or structure_payload["files"] or structure_payload["project_summary"]:
+            observations_kwargs["structure_hints"] = structure_payload
+
+        return Observation(**observations_kwargs)
+
+    def _update_structure_hints_from_summary(
+        self, summaries: List[Mapping[str, Any]], project_summary: Optional[str]
+    ) -> None:
+        file_hints = self._structure_hints.setdefault("files", {})
+        symbol_set: Set[str] = self._structure_hints.setdefault("symbols", set())
+
+        for entry in summaries:
+            path = entry.get("path")
+            outline = entry.get("outline") or []
+            if not path:
+                continue
+            symbols = extract_symbols_from_outline(outline)
+            file_hints[path] = {
+                "outline": outline,
+                "symbols": symbols,
+            }
+            symbol_set.update(symbols)
+
+        if project_summary:
+            self._structure_hints["project_summary"] = project_summary
+
+    def _export_structure_hints(self) -> Dict[str, Any]:
+        files_payload: Dict[str, Any] = {}
+        file_hints = self._structure_hints.get("files") or {}
+        for path, info in file_hints.items():
+            outline = info.get("outline") or []
+            symbols = info.get("symbols") or []
+            files_payload[path] = {
+                "outline": outline[:20],
+                "symbols": sorted(set(symbols))[:20],
+            }
+
+        symbols = sorted(set(self._structure_hints.get("symbols") or []))[:50]
+        return {
+            "symbols": symbols,
+            "files": files_payload,
+            "project_summary": self._structure_hints.get("project_summary"),
+        }
 
 
 

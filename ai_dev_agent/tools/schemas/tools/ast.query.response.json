@@ -5,7 +5,7 @@
   "properties": {
     "mode": {
       "type": "string",
-      "enum": ["query", "summary", "symbols"]
+      "enum": ["query", "summary"]
     },
     "nodes": {
       "type": "array",
