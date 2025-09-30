@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "exec request",
+  "description": "Execute a shell command. Platform: ${OS}. Use ${SHELL} syntax. Examples: ${PLATFORM_EXAMPLES}",
   "type": "object",
   "required": ["cmd"],
   "properties": {

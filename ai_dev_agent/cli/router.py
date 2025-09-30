@@ -1,19 +1,20 @@
 """Natural-language intent routing leveraging LLM tool calling."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-import json
 
+from ai_dev_agent.cli.utils import build_system_context
+from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.core.utils.constants import LEGACY_TOOL_NAMES
+from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
 from ai_dev_agent.providers.llm.base import (
     LLMClient,
     LLMError,
     Message,
     ToolCallResult,
 )
-from ai_dev_agent.core.utils.config import Settings
-from ai_dev_agent.core.utils.constants import LEGACY_TOOL_NAMES
-from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
 from ai_dev_agent.tools import registry as tool_registry
 
 DEFAULT_TOOLS: List[Dict[str, Any]] = []
@@ -43,6 +44,7 @@ class IntentRouter:
     ) -> None:
         self.client = client
         self.settings = settings
+        self._system_context = build_system_context()
         self.tools = tools or self._build_tool_list(settings)
 
     def _build_tool_list(self, settings: Settings) -> List[Dict[str, Any]]:
@@ -84,7 +86,12 @@ class IntentRouter:
             except Exception:
                 params_schema = {"type": "object", "properties": {}, "additionalProperties": True}
 
+            if name == "exec":
+                params_schema = self._augment_exec_schema(params_schema)
+
             description = spec.description or ""
+            if name == "exec":
+                description = self._augment_exec_description(description)
             if name == "fs.write_patch" and not getattr(settings, "auto_approve_code", False):
                 description = (description or "Apply a unified diff") + \
                               " (auto_approve_code is recommended for automated edits)"
@@ -158,14 +165,65 @@ class IntentRouter:
 
     def _system_prompt(self) -> str:
         workspace = str(self.settings.workspace_root or ".")
+        ctx = self._system_context
+        available_tools = ", ".join(ctx["available_tools"]) if ctx["available_tools"] else "none detected"
+        command_mappings = ", ".join(f"{key}={value}" for key, value in ctx["command_mappings"].items())
+
+        lines = [
+            "You route developer requests for the DevAgent CLI.",
+            "SYSTEM CONTEXT:",
+            f"- Operating System: {ctx['os_friendly']} {ctx['os_version']} ({ctx['os']})",
+            f"- Architecture: {ctx['architecture']}",
+            f"- Python Version: {ctx['python_version']}",
+            f"- Shell: {ctx['shell']} ({ctx['shell_type']} syntax)",
+            f"- Working Directory: {ctx['cwd']}",
+            f"- Home Directory: {ctx['home_dir']}",
+            f"- Available Tools: {available_tools}",
+            (
+                "- Command Separator: '"
+                f"{ctx['command_separator']}' | Path Separator: '{ctx['path_separator']}' | Null Device: {ctx['null_device']}"
+            ),
+            f"- Temp Directory: {ctx['temp_dir']}",
+            f"- Platform Command Mappings: {command_mappings}",
+            f"- Platform Examples: {ctx['platform_examples']}",
+            "IMPORTANT:",
+            f"- Use {'Unix' if ctx['is_unix'] else 'Windows'} command syntax and validate commands exist before invoking exec.",
+            "- Never emit empty 'cmd' values for exec-related tools; include all required arguments.",
+            "- Prefer registry tools over 'exec'; only run commands when no dedicated tool applies.",
+            "- Locate files with 'code.search' or 'symbols.index' + 'symbols.find' before using 'fs.read'.",
+            "- Use 'fs.read' with specific paths and optional 'context_lines' to keep outputs small.",
+            f"- The repository root is at '{workspace}'. Return concise rationales when helpful.",
+        ]
+        return "\n".join(lines)
+
+    def _augment_exec_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        ctx = self._system_context
+        updated = dict(schema)
+        updated["description"] = (
+            "Execute a shell command. "
+            f"Platform: {ctx['os_friendly']} {ctx['os_version']} ({ctx['os']}). "
+            f"Shell: {ctx['shell']} ({ctx['shell_type']} syntax). "
+            f"Path separator: '{ctx['path_separator']}'. Command separator: '{ctx['command_separator']}'. "
+            f"Examples: {ctx['platform_examples']}."
+        )
+        properties = dict(updated.get("properties") or {})
+        cmd_schema = dict(properties.get("cmd") or {"type": "string"})
+        cmd_schema["description"] = (
+            "Primary command string. Never leave blank and ensure the binary exists for this platform. "
+            f"Null device: {ctx['null_device']}."
+        )
+        properties["cmd"] = cmd_schema
+        updated["properties"] = properties
+        return updated
+
+    def _augment_exec_description(self, description: str) -> str:
+        ctx = self._system_context
+        base = description or "Execute a shell command."
+        available_tools = ", ".join(ctx["available_tools"]) if ctx["available_tools"] else "none detected"
         return (
-            "You route developer requests for the DevAgent CLI. "
-            "Always choose the most appropriate tool description based on the request. "
-            "Locate files with 'code.search' or 'symbols.index' + 'symbols.find' before using 'fs.read'. "
-            "Use 'fs.read' with specific paths and optional 'context_lines' to keep outputs small. "
-            "Prefer registry tools over 'exec'; only run commands when no dedicated tool applies. "
-            "The repository root is at "
-            f"'{workspace}'. Return concise rationales when helpful."
+            f"{base} Platform: {ctx['os_friendly']} {ctx['os_version']} ({ctx['os']}). "
+            f"Shell: {ctx['shell']} ({ctx['shell_type']} syntax). Available tools: {available_tools}. "
+            f"Examples: {ctx['platform_examples']}."
         )
 
     # No keyword-based fallback routing

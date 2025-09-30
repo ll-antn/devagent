@@ -9,7 +9,11 @@ import click
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.tool_utils import expand_tool_aliases
 
-from ..utils import _invoke_registry_tool, _normalize_argument_list
+from ..utils import (
+    _invoke_registry_tool,
+    _normalize_argument_list,
+    build_system_context,
+)
 
 PayloadBuilder = Callable[[click.Context, Dict[str, Any]], Tuple[Dict[str, Any], Dict[str, Any]]]
 ResultHandler = Callable[[click.Context, Dict[str, Any], Dict[str, Any], Dict[str, Any]], None]
@@ -367,10 +371,19 @@ def _handle_ast_query_result(
 def _build_exec_payload(
     ctx: click.Context, arguments: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    ctx_obj = ctx.obj if isinstance(ctx.obj, dict) else {}
+    system_context = ctx_obj.setdefault("_system_context", build_system_context()) if isinstance(ctx_obj, dict) else build_system_context()
     cmd_value = arguments.get("cmd") or arguments.get("command")
     cmd = str(cmd_value or "").strip()
     if not cmd:
-        raise click.ClickException("exec requires 'cmd'.")
+        raise click.ClickException(
+            "exec requires 'cmd'. Received arguments: "
+            f"{arguments}. System: {system_context.get('os')}. "
+            "Ensure the LLM provided a valid command for this platform."
+        )
+
+    if system_context.get("os") == "Windows" and cmd.startswith("ls"):
+        cmd = cmd.replace("ls", "dir", 1)
 
     payload: Dict[str, Any] = {"cmd": cmd}
     if arguments.get("args"):
@@ -484,4 +497,3 @@ REGISTRY_INTENTS: Dict[str, RegistryIntent] = {
 }
 
 INTENT_HANDLERS: Dict[str, RegistryIntent] = expand_tool_aliases(REGISTRY_INTENTS)
-
