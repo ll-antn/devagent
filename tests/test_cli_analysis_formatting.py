@@ -1,4 +1,4 @@
-from ai_dev_agent.cli.analysis.formatting import _get_main_argument
+from ai_dev_agent.cli.analysis.formatting import _format_enhanced_tool_log, _get_main_argument
 from ai_dev_agent.providers.llm.base import ToolCall
 
 
@@ -40,3 +40,37 @@ index e69de29..0000000
 """
     call = _tool_call("fs.write_patch", diff)
     assert _get_main_argument(call) == "src/old.py"
+
+
+def test_get_main_argument_symbols_find_uses_name():
+    call = ToolCall(name="symbols.find", arguments={"name": "numberLiteral", "lang": "cpp"})
+    assert _get_main_argument(call) == "numberLiteral"
+
+
+def test_format_enhanced_tool_log_includes_write_patch_target():
+    diff = """diff --git a/checker/ETSAnalyzer.cpp b/checker/ETSAnalyzer.cpp
+--- a/checker/ETSAnalyzer.cpp
++++ b/checker/ETSAnalyzer.cpp
+@@ -1,3 +1,4 @@
+"""
+    call = _tool_call("fs.write_patch", diff)
+    log = _format_enhanced_tool_log(
+        call,
+        repeat_count=1,
+        execution_time=0.0,
+        tool_output="Patch failed to apply",
+        success=True,
+    )
+    assert log.startswith('⚡ fs.write_patch "checker/ETSAnalyzer.cpp" → Patch failed to apply')
+
+
+def test_format_enhanced_tool_log_includes_symbols_find_name():
+    call = ToolCall(name="symbols.find", arguments={"name": "numberLiteral", "lang": "cpp"})
+    log = _format_enhanced_tool_log(
+        call,
+        repeat_count=1,
+        execution_time=0.0,
+        tool_output="No definitions found.",
+        success=True,
+    )
+    assert log.startswith('🔣 symbols.find "numberLiteral" → No definitions found.')

@@ -79,7 +79,7 @@ def _get_main_argument(tool_call) -> str:
             return targets[0]
         return f"{len(targets)} files"
 
-    for key in ["path", "paths", "query", "cmd", "command", "goal", "question"]:
+    for key in ["path", "paths", "query", "cmd", "command", "goal", "question", "name"]:
         if key in args and args[key]:
             value = args[key]
             if key == "paths" and isinstance(value, list):
