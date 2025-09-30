@@ -13,19 +13,33 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for <3.11
     import tomli as tomllib  # type: ignore
 
 
+CONFIG_FILENAMES: tuple[str, ...] = (".devagent.toml", "devagent.toml")
 DEFAULT_CONFIG_PATHS = (
-    Path.cwd() / ".devagent.toml",
     Path.home() / ".config" / "devagent" / "config.toml",
+    Path.home() / ".devagent.toml",
+    Path.home() / "devagent.toml",
 )
 
 
-def find_config_in_parents(start_path: Path, config_name: str = ".devagent.toml") -> Optional[Path]:
-    """Search parent directories starting from ``start_path`` for ``config_name``."""
+def find_config_in_parents(
+    start_path: Path, config_name: str | Sequence[str] = ".devagent.toml"
+) -> Optional[Path]:
+    """Search parent directories starting from ``start_path`` for configuration files."""
+
+    if isinstance(config_name, str):
+        candidate_names: tuple[str, ...] = (config_name,)
+    else:
+        candidate_names = tuple(config_name)
+
     current = start_path.resolve()
+    if current.is_file():
+        current = current.parent
+
     while True:
-        candidate = current / config_name
-        if candidate.is_file():
-            return candidate
+        for name in candidate_names:
+            candidate = current / name
+            if candidate.is_file():
+                return candidate.resolve()
         if current.parent == current:
             break
         current = current.parent
@@ -168,9 +182,12 @@ def load_settings(explicit_path: Optional[Path] = None) -> Settings:
         file_data.update(_load_from_file(explicit_path))
     else:
         search_paths = []
-        project_config = find_config_in_parents(Path.cwd())
+        cwd = Path.cwd()
+        project_config = find_config_in_parents(cwd, CONFIG_FILENAMES)
         if project_config:
             search_paths.append(project_config)
+        for name in CONFIG_FILENAMES:
+            search_paths.append(cwd / name)
         search_paths.extend(DEFAULT_CONFIG_PATHS)
         seen_paths = set()
         for candidate in search_paths:

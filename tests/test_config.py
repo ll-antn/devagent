@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from ai_dev_agent.core.utils.config import Settings, load_settings
@@ -33,3 +32,33 @@ provider_only = ["Cerebras"]
     assert settings.provider_only == ("Cerebras",)
     assert settings.provider_config == {"priority": ["Cerebras"]}
     assert settings.request_headers == {"HTTP-Referer": "https://example.com"}
+
+
+def test_project_config_discovered_in_parent_directory(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    nested_dir = project_root / "src" / "module"
+    nested_dir.mkdir(parents=True)
+
+    config_path = project_root / ".devagent.toml"
+    config_path.write_text("model = 'parent-tree-model'\n")
+
+    monkeypatch.chdir(nested_dir)
+
+    settings = load_settings()
+
+    assert settings.model == "parent-tree-model"
+
+
+def test_project_config_without_dot_discovered_in_parent_directory(tmp_path, monkeypatch):
+    project_root = tmp_path / "repo"
+    nested_dir = project_root / "src" / "module"
+    nested_dir.mkdir(parents=True)
+
+    config_path = project_root / "devagent.toml"
+    config_path.write_text("model = 'parent-tree-no-dot'\n")
+
+    monkeypatch.chdir(nested_dir)
+
+    settings = load_settings()
+
+    assert settings.model == "parent-tree-no-dot"
