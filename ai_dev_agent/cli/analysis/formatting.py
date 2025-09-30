@@ -71,6 +71,14 @@ def _get_main_argument(tool_call) -> str:
             return joined_args
         return cmd
 
+    if tool_call.name in ("fs.write_patch", "fs_write_patch"):
+        targets = _extract_patch_targets(args.get("diff"))
+        if not targets:
+            return ""
+        if len(targets) == 1:
+            return targets[0]
+        return f"{len(targets)} files"
+
     for key in ["path", "paths", "query", "cmd", "command", "goal", "question"]:
         if key in args and args[key]:
             value = args[key]
@@ -78,6 +86,47 @@ def _get_main_argument(tool_call) -> str:
                 return value[0] if value else ""
             return str(value)
     return ""
+
+
+def _extract_patch_targets(diff_content: Any) -> List[str]:
+    """Return the set of files targeted by a unified diff."""
+
+    if not isinstance(diff_content, str) or not diff_content.strip():
+        return []
+
+    files: List[str] = []
+    diff_pattern = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+    fallback_pattern = re.compile(r"^\+\+\+ b/(.+)$")
+
+    for line in diff_content.splitlines():
+        match = diff_pattern.match(line.strip())
+        if not match:
+            continue
+        old_path = _normalize_patch_path(match.group(1))
+        new_path = _normalize_patch_path(match.group(2))
+        candidate = new_path if new_path and new_path != "/dev/null" else old_path
+        if candidate and candidate != "/dev/null" and candidate not in files:
+            files.append(candidate)
+
+    if files:
+        return files
+
+    for line in diff_content.splitlines():
+        match = fallback_pattern.match(line.strip())
+        if not match:
+            continue
+        candidate = _normalize_patch_path(match.group(1))
+        if candidate and candidate != "/dev/null" and candidate not in files:
+            files.append(candidate)
+
+    return files
+
+
+def _normalize_patch_path(path: str) -> str:
+    path = (path or "").strip()
+    if path.startswith('"') and path.endswith('"') and len(path) >= 2:
+        path = path[1:-1]
+    return path
 
 
 def _format_enhanced_tool_log(
