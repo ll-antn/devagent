@@ -1,6 +1,7 @@
 """Registry-backed intent handlers used by the CLI."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -14,6 +15,39 @@ from ..utils import (
     _normalize_argument_list,
     build_system_context,
 )
+
+
+_REGEX_HINT_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?<!\\)\\[AbBdDsSwWZA]"),
+    re.compile(r"(?<!\\)\\[pP]\{"),
+    re.compile(r"(?<!\\)\\k<"),
+    re.compile(r"(?<!\\)\\x[0-9A-Fa-f]{2}"),
+    re.compile(r"(?<!\\)\\u[0-9A-Fa-f]{4}"),
+    re.compile(r"(?<!\\)\[[^\]]+\]"),
+    re.compile(r"(?<!\\)\(\?"),
+    re.compile(r"(?<!\\)\{[0-9,\s]+\}"),
+    re.compile(r"(?<!\\)\|"),
+    re.compile(r"(?<!\\)\.\*"),
+    re.compile(r"(?<!\\)\.\+"),
+    re.compile(r"(?<!\\)\.\?"),
+)
+
+
+def _should_enable_regex(query: str) -> bool:
+    if not query:
+        return False
+
+    stripped = query.strip()
+    if stripped.startswith("^") and not stripped.startswith(r"\^"):
+        return True
+    if stripped.endswith("$") and not stripped.endswith(r"\$"):
+        return True
+
+    for pattern in _REGEX_HINT_PATTERNS:
+        if pattern.search(query):
+            return True
+
+    return False
 
 PayloadBuilder = Callable[[click.Context, Dict[str, Any]], Tuple[Dict[str, Any], Dict[str, Any]]]
 ResultHandler = Callable[[click.Context, Dict[str, Any], Dict[str, Any], Dict[str, Any]], None]
@@ -61,9 +95,8 @@ def _build_code_search_payload(
 
     if "regex" in arguments:
         payload["regex"] = bool(arguments.get("regex"))
-    else:
-        if any(ch in query for ch in ("|", "^", "$", "[", "]", "(", ")", ".", "*")):
-            payload["regex"] = True
+    elif _should_enable_regex(query):
+        payload["regex"] = True
 
     max_results = default_max_results
     if "max_results" in arguments:
