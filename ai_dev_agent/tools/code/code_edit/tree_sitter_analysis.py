@@ -17,7 +17,7 @@ from ai_dev_agent.core.utils.logger import get_logger
 
 LOGGER = get_logger(__name__)
 
-_SUPPORTED_LANGUAGES = {"python", "typescript", "tsx", "javascript", "c", "cpp"}
+_SUPPORTED_LANGUAGES = {"python", "typescript", "tsx", "javascript", "c", "cpp", "go", "rust"}
 _SUPPORTED_SUFFIXES = tuple(
     suffix for suffix, language in EXTENSION_LANGUAGE_MAP.items() if language in _SUPPORTED_LANGUAGES
 )
@@ -156,7 +156,10 @@ class TreeSitterProjectAnalyzer:
             return self._summarize_javascript(tree, source_bytes)
         if language in {"c", "cpp"}:
             return self._summarize_c_cpp(tree, source_bytes, language=language)
-        # TODO: extend support for other languages as needed
+        if language == "go":
+            return self._summarize_go(tree, source_bytes)
+        if language == "rust":
+            return self._summarize_rust(tree, source_bytes)
         return []
 
     # Python -----------------------------------------------------------------
@@ -724,6 +727,163 @@ class TreeSitterProjectAnalyzer:
 
         return []
 
+    # Go --------------------------------------------------------------------
+
+    def _summarize_go(self, tree, source_bytes: bytes) -> List[str]:
+        outline: List[str] = []
+        root = getattr(tree, "root_node", None)
+        if root is None:
+            return outline
+
+        for child in getattr(root, "children", []):
+            if not getattr(child, "is_named", False):
+                continue
+            node_type = getattr(child, "type", "")
+            line_no = child.start_point[0] + 1
+
+            if node_type in {"function_declaration", "method_declaration"}:
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                signature_node = child.child_by_field_name("signature")
+                signature = (
+                    self._clean_signature(self._node_text(signature_node, source_bytes))
+                    if signature_node is not None
+                    else "()"
+                )
+                receiver_node = child.child_by_field_name("receiver")
+                receiver = (
+                    self._clean_signature(self._node_text(receiver_node, source_bytes))
+                    if receiver_node is not None
+                    else ""
+                )
+                if node_type == "method_declaration" and receiver:
+                    descriptor = f"method {receiver} {name}{signature}"
+                else:
+                    descriptor = f"function {name}{signature}"
+                outline.append(f"- {descriptor} (line {line_no})")
+            elif node_type == "type_declaration":
+                specs = child.child_by_field_name("specs")
+                for spec in getattr(specs, "children", []):
+                    if getattr(spec, "type", "") != "type_spec":
+                        continue
+                    name_node = spec.child_by_field_name("name")
+                    type_node = spec.child_by_field_name("type")
+                    name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                    type_kind = getattr(type_node, "type", "") if type_node is not None else ""
+                    descriptor: str
+                    if type_kind == "struct_type":
+                        descriptor = f"struct {name}"
+                    elif type_kind == "interface_type":
+                        descriptor = f"interface {name}"
+                    else:
+                        descriptor = f"type {name}"
+                        if type_node is not None:
+                            type_text = self._shorten(
+                                self._clean_signature(self._node_text(type_node, source_bytes)),
+                                limit=40,
+                            )
+                            if type_text:
+                                descriptor = f"{descriptor} = {type_text}"
+                    spec_line = spec.start_point[0] + 1
+                    outline.append(f"- {descriptor} (line {spec_line})")
+
+            if len(outline) >= self.max_lines_per_file:
+                break
+
+        return outline[: self.max_lines_per_file]
+
+    # Rust ------------------------------------------------------------------
+
+    def _summarize_rust(self, tree, source_bytes: bytes) -> List[str]:
+        outline: List[str] = []
+        root = getattr(tree, "root_node", None)
+        if root is None:
+            return outline
+
+        for child in getattr(root, "children", []):
+            if not getattr(child, "is_named", False):
+                continue
+            node_type = getattr(child, "type", "")
+            line_no = child.start_point[0] + 1
+
+            if node_type == "function_item":
+                header = self._extract_before_field(child, "body", source_bytes)
+                header = self._clean_signature(header)
+                if header.startswith("fn "):
+                    header = header[3:].strip()
+                outline.append(f"- function {self._shorten(header, limit=80)} (line {line_no})")
+            elif node_type == "struct_item":
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                outline.append(f"- struct {self._clean_signature(name)} (line {line_no})")
+            elif node_type == "enum_item":
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                body = child.child_by_field_name("body")
+                variants: List[str] = []
+                if body is not None:
+                    for variant in getattr(body, "children", []):
+                        if getattr(variant, "type", "") != "enum_variant":
+                            continue
+                        variant_name_node = variant.child_by_field_name("name") or variant
+                        variant_name = self._clean_signature(
+                            self._node_text(variant_name_node, source_bytes)
+                        )
+                        if variant_name:
+                            variants.append(variant_name)
+                preview = ", ".join(variants[:3])
+                if len(variants) > 3:
+                    preview += ", …"
+                suffix = f" [{preview}]" if preview else ""
+                outline.append(f"- enum {self._clean_signature(name)}{suffix} (line {line_no})")
+            elif node_type == "trait_item":
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                outline.append(f"- trait {self._clean_signature(name)} (line {line_no})")
+            elif node_type == "impl_item":
+                trait_node = child.child_by_field_name("trait")
+                type_node = child.child_by_field_name("type")
+                trait_text = (
+                    self._clean_signature(self._node_text(trait_node, source_bytes))
+                    if trait_node is not None
+                    else ""
+                )
+                type_text = (
+                    self._clean_signature(self._node_text(type_node, source_bytes))
+                    if type_node is not None
+                    else ""
+                )
+                if trait_text:
+                    descriptor = f"impl {trait_text} for {type_text}".strip()
+                else:
+                    descriptor = f"impl {type_text}".strip()
+                outline.append(f"- {descriptor} (line {line_no})")
+            elif node_type == "mod_item":
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                outline.append(f"- module {self._clean_signature(name)} (line {line_no})")
+            elif node_type == "type_item":
+                name_node = child.child_by_field_name("name")
+                name = self._node_text(name_node, source_bytes) or "<anonymous>"
+                type_node = child.child_by_field_name("type")
+                type_text = (
+                    self._shorten(
+                        self._clean_signature(self._node_text(type_node, source_bytes)),
+                        limit=60,
+                    )
+                    if type_node is not None
+                    else ""
+                )
+                descriptor = f"type {name}"
+                if type_text:
+                    descriptor = f"{descriptor} = {type_text}"
+                outline.append(f"- {descriptor} (line {line_no})")
+
+            if len(outline) >= self.max_lines_per_file:
+                break
+
+        return outline[: self.max_lines_per_file]
+
     # Generic helpers --------------------------------------------------------
 
     def _segment_text(self, source_bytes: bytes, start: int, end: int) -> str:
@@ -785,6 +945,7 @@ SYMBOL_KINDS = {
     "trait",
     "impl",
     "component",
+    "type",
 }
 
 

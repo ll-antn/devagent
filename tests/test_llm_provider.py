@@ -145,3 +145,8 @@ def test_create_client_openrouter_aliases():
     assert isinstance(cerebras_client, OpenRouterClient)
     payload = cerebras_client._prepare_payload([Message(role="user", content="hi")], 0.0, None)
     assert payload["provider"]["only"] == ["Cerebras"]
+
+
+def test_create_client_rejects_unknown_provider():
+    with pytest.raises(ValueError, match="Unsupported LLM provider"):
+        create_client(provider="unknown", api_key="k", model="m")

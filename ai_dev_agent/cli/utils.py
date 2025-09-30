@@ -18,7 +18,7 @@ from ai_dev_agent.core.approval.approvals import ApprovalManager
 from ai_dev_agent.core.approval.policy import ApprovalPolicy
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.context_budget import BudgetedLLMClient, config_from_settings
-from ai_dev_agent.core.utils.constants import MAX_HISTORY_ENTRIES
+from ai_dev_agent.core.utils.constants import DEFAULT_IGNORED_REPO_DIRS, MAX_HISTORY_ENTRIES
 from ai_dev_agent.core.utils.devagent_config import load_devagent_yaml
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.logger import get_logger, set_correlation_id
@@ -192,18 +192,7 @@ def _collect_project_structure_outline(
     if not analyzer.available:
         return None
 
-    skip_dirs = {
-        ".git",
-        ".hg",
-        ".svn",
-        "node_modules",
-        "vendor",
-        "dist",
-        "build",
-        "__pycache__",
-        ".venv",
-        "venv",
-    }
+    skip_dirs = DEFAULT_IGNORED_REPO_DIRS
 
     file_entries: List[Tuple[str, str]] = []
     seen_paths: Set[str] = set()
@@ -665,11 +654,6 @@ def get_llm_client(ctx: click.Context):
     ctx.obj["llm_client"] = wrapped_client
     return wrapped_client
 
-# Backwards-compatible aliases for legacy imports
-_infer_task_files = infer_task_files
-_update_task_state = update_task_state
-_get_llm_client = get_llm_client
-
 __all__ = [
     "build_system_context",
     "_resolve_repo_path",
@@ -690,8 +674,4 @@ __all__ = [
     "_build_context",
     "_prompt_yes_no",
     "_record_invocation",
-    # Backwards-compat exports
-    "_infer_task_files",
-    "_update_task_state",
-    "_get_llm_client",
 ]

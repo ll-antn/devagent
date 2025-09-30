@@ -6,4 +6,9 @@ from . import sandbox  # noqa: F401
 from . import shell_session  # noqa: F401
 from . import testing  # noqa: F401
 
-__all__ = []
+__all__ = [
+    "direct",
+    "sandbox",
+    "shell_session",
+    "testing",
+]

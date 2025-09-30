@@ -9,10 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from ai_dev_agent.core.utils.constants import DEFAULT_IGNORED_REPO_DIRS
 from ai_dev_agent.core.utils.logger import get_logger
 from .tree_sitter_analysis import TreeSitterProjectAnalyzer, extract_symbols_from_outline
 
 LOGGER = get_logger(__name__)
+
+
+_EXCLUDED_DIR_PATTERNS = tuple(sorted({f"{name}/*" for name in DEFAULT_IGNORED_REPO_DIRS}))
 
 
 @dataclass
@@ -40,11 +44,18 @@ class ContextGatheringOptions:
     follow_imports: bool = True
     include_related_files: bool = True
     include_structure_summary: bool = True
-    exclude_patterns: List[str] = field(default_factory=lambda: [
-        "*.pyc", "*.pyo", "__pycache__/*", ".git/*", "node_modules/*",
-        "*.min.js", "*.bundle.js", "dist/*", "build/*", ".venv/*",
-        "venv/*", ".env", "*.log", "*.tmp"
-    ])
+    exclude_patterns: List[str] = field(
+        default_factory=lambda: [
+            "*.pyc",
+            "*.pyo",
+            *_EXCLUDED_DIR_PATTERNS,
+            "*.min.js",
+            "*.bundle.js",
+            ".env",
+            "*.log",
+            "*.tmp",
+        ]
+    )
 
 
 class ContextGatherer:
@@ -638,7 +649,11 @@ class ContextGatherer:
         try:
             for root, dirs, files in os.walk(self.repo_root):
                 # Skip common ignore patterns
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'node_modules'}]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not d.startswith('.') and d not in DEFAULT_IGNORED_REPO_DIRS
+                ]
                 
                 for file in files:
                     if file_types and not any(file.endswith(f'.{ft}') for ft in file_types):
@@ -678,7 +693,11 @@ class ContextGatherer:
 
         try:
             for root, dirs, files in os.walk(self.repo_root):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {'__pycache__', 'node_modules'}]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not d.startswith('.') and d not in DEFAULT_IGNORED_REPO_DIRS
+                ]
 
                 for file in files:
                     if file_types and not any(file.endswith(f'.{ft}') for ft in file_types):

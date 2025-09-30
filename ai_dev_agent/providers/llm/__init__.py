@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .base import (
+    HTTPChatLLMClient,
     LLMClient,
     LLMConnectionError,
     LLMError,
@@ -43,7 +44,7 @@ def create_client(
     key = provider.lower()
     try:
         provider_entry = _PROVIDER_MAP[key]
-    except KeyError as exc:  # pragma: no cover - defensive
+    except KeyError as exc:
         raise ValueError(f"Unsupported LLM provider: {provider}") from exc
 
     client_cls = provider_entry["client"]
@@ -65,6 +66,7 @@ def create_client(
 
 __all__ = [
     "create_client",
+    "HTTPChatLLMClient",
     "LLMClient",
     "LLMError",
     "LLMRateLimitError",

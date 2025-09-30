@@ -1,3 +1,5 @@
+import pytest
+
 from ai_dev_agent.cli.router import IntentDecision, IntentRouter, IntentRoutingError
 from ai_dev_agent.providers.llm.base import ToolCall, ToolCallResult
 from ai_dev_agent.core.utils.config import Settings
@@ -54,9 +56,5 @@ def test_intent_router_empty_prompt_raises(tmp_path):
     client = DummyClient(ToolCallResult(calls=[], message_content=""))
 
     router = IntentRouter(client, settings)
-    try:
+    with pytest.raises(IntentRoutingError):
         router.route("   ")
-    except IntentRoutingError:
-        pass
-    else:  # pragma: no cover - ensure exception raised
-        raise AssertionError("Expected routing error for empty prompt")

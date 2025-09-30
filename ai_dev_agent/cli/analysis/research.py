@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import click
 
 from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.core.utils.constants import DEFAULT_IGNORED_REPO_DIRS
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.tool_utils import canonical_tool_name, tool_category
 from ai_dev_agent.core.utils.text import (
@@ -933,7 +934,7 @@ def _search_paths_and_content(
     keyword_lower = keyword.lower()
     results: List[str] = []
     seen: set[str] = set()
-    skip_dirs = {".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__"}
+    skip_dirs = DEFAULT_IGNORED_REPO_DIRS
 
     def maybe_add(path: Path) -> None:
         try:

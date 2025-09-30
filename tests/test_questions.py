@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ai_dev_agent.tools.code.code_edit.context import ContextGatheringOptions
-from ai_dev_agent.providers.llm.base import LLMError
+from ai_dev_agent.providers.llm.base import LLMError, RetryConfig
 from ai_dev_agent.tools.query.questions import QuestionAnswerer
 
 
@@ -13,11 +13,11 @@ class DummyClient:
         self.messages = messages
         return "Sample answer"
 
-    def configure_timeout(self, timeout: float) -> None:  # pragma: no cover - noop
-        return None
+    def configure_timeout(self, timeout: float) -> None:
+        self._timeout = timeout
 
-    def configure_retry(self, retry_config) -> None:  # pragma: no cover - noop
-        return None
+    def configure_retry(self, retry_config) -> None:
+        self._retry_config = retry_config
 
 
 def test_question_answerer_gathers_context(tmp_path: Path) -> None:
@@ -48,11 +48,11 @@ class FailingClient:
     def complete(self, messages, temperature=0.15, max_tokens=None, extra_headers=None):
         raise LLMError("Rate limited")
 
-    def configure_timeout(self, timeout: float) -> None:  # pragma: no cover - noop
-        return None
+    def configure_timeout(self, timeout: float) -> None:
+        self._timeout = timeout
 
-    def configure_retry(self, retry_config) -> None:  # pragma: no cover - noop
-        return None
+    def configure_retry(self, retry_config) -> None:
+        self._retry_config = retry_config
 
 
 def test_question_answerer_fallback(tmp_path: Path) -> None:
@@ -60,7 +60,10 @@ def test_question_answerer_fallback(tmp_path: Path) -> None:
     module_path.parent.mkdir(parents=True, exist_ok=True)
     module_path.write_text("def greet(name):\n    return f'hi {name}'\n", encoding="utf-8")
 
-    answerer = QuestionAnswerer(tmp_path, FailingClient())
+    failing_client = FailingClient()
+    failing_client.configure_timeout(15.0)
+    failing_client.configure_retry(RetryConfig())
+    answerer = QuestionAnswerer(tmp_path, failing_client)
     result = answerer.answer("How does greet work?", files=["src/module.py"], keywords=["greet"])
 
     assert "LLM service is unavailable" in result.answer
@@ -73,6 +76,8 @@ def test_question_answerer_detects_root_toml(tmp_path: Path) -> None:
     pyproject.write_text("[tool.example]\nname = 'demo'\n", encoding="utf-8")
 
     client = DummyClient()
+    client.configure_timeout(30.0)
+    client.configure_retry(RetryConfig())
     answerer = QuestionAnswerer(tmp_path, client)
 
     contexts = answerer.gather_context("Which TOML files exist in the root directory?", files=None, keywords=None)

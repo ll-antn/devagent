@@ -20,7 +20,7 @@ LOGGER = get_logger(__name__)
 
 
 class RegistryToolInvoker:
-    """Invoke registered tools and maintain limited legacy support."""
+    """Invoke registered tools backed by the shared registry."""
 
     def __init__(
         self,

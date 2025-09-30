@@ -1,11 +1,26 @@
 """Constants used throughout the application."""
 
+# Repository traversal defaults
+DEFAULT_IGNORED_REPO_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        "env",
+        "dist",
+        "build",
+        "vendor",
+    }
+)
+
 # Tool execution limits
 MAX_HISTORY_ENTRIES = 50
 MIN_TOOL_OUTPUT_CHARS = 256
 DEFAULT_MAX_TOOL_OUTPUT_CHARS = 4_000
-# Backwards compatibility for older imports
-MAX_TOOL_OUTPUT_CHARS = DEFAULT_MAX_TOOL_OUTPUT_CHARS
 MAX_METRICS_ENTRIES = 500
 
 # Conversation context defaults

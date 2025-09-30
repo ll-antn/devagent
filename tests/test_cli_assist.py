@@ -243,13 +243,15 @@ def test_assist_react_flow_executes_tool_sequence(assist_harness: AssistHarness)
                 )
             return ToolCallResult(calls=[], message_content="ReAct located the greet helper." )
 
-        def configure_timeout(self, *_args, **_kwargs) -> None:  # pragma: no cover - contract stub
-            return None
+        def configure_timeout(self, *_args, **_kwargs) -> None:
+            self._timeout = _kwargs.get("timeout")
 
-        def configure_retry(self, *_args, **_kwargs) -> None:  # pragma: no cover - contract stub
-            return None
+        def configure_retry(self, *_args, **_kwargs) -> None:
+            self._retry = (_args, _kwargs)
 
     react_client = ScriptedToolClient()
+    react_client.configure_timeout(timeout=60.0)
+    react_client.configure_retry("dummy")
     assist_harness.set_client(react_client)
     assist_harness.configure_router()  # ensure direct routing is not used
 

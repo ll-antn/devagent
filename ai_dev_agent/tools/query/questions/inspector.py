@@ -8,21 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence, Set
 
+from ai_dev_agent.core.utils.constants import DEFAULT_IGNORED_REPO_DIRS
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.logger import get_logger
 
 LOGGER = get_logger(__name__)
 
 
-_SKIP_DIRECTORIES = {
-    ".git",
-    "__pycache__",
-    "node_modules",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-}
+_SKIP_DIRECTORIES = DEFAULT_IGNORED_REPO_DIRS
 
 
 _QUESTION_EXTRA_STOPWORDS = {

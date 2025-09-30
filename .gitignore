@@ -48,6 +48,7 @@ temp/
 
 # System junk
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # Local environment files
@@ -57,4 +58,3 @@ Thumbs.db
 
 # Automation reports
 reports/
-
