@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import shlex
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..registry import ToolContext, ToolSpec, registry
+from .shell_session import ShellSessionError, ShellSessionManager, ShellSessionTimeout
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "tools"
 
@@ -36,6 +37,37 @@ def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[s
         env.update({str(key): str(value) for key, value in env_overrides.items()})
 
     command = _build_command(cmd, args)
+
+    extra = context.extra or {}
+    manager = extra.get("shell_session_manager") if isinstance(extra, dict) else None
+    session_id = extra.get("shell_session_id") if isinstance(extra, dict) else None
+
+    if isinstance(manager, ShellSessionManager) and isinstance(session_id, str):
+        command_str = " ".join(shlex.quote(part) for part in command)
+        if cwd_value is not None:
+            command_str = f"cd {shlex.quote(str(cwd))} && {command_str}"
+        try:
+            result = manager.execute(
+                session_id,
+                command_str,
+                timeout=float(timeout) if timeout is not None else None,
+            )
+        except ShellSessionTimeout as exc:
+            raise TimeoutError(str(exc)) from exc
+        except ShellSessionError:
+            raise
+
+        stdout_tail = result.stdout[-4000:] if result.stdout else ""
+        stderr_tail = result.stderr[-2000:] if result.stderr else ""
+
+        return {
+            "exit_code": result.exit_code,
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+            "log_path": None,
+            "duration_ms": result.duration_ms,
+        }
+
     start = time.perf_counter()
     process = subprocess.run(
         command,

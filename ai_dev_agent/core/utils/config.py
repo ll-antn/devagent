@@ -81,6 +81,10 @@ class Settings:
     sandbox_allowlist: tuple[str, ...] = ()
     sandbox_memory_limit_mb: int = 2048
     sandbox_cpu_time_limit: int = 120
+    shell_executable: Optional[str] = None
+    shell_session_timeout: Optional[float] = None
+    shell_session_cpu_time_limit: Optional[int] = None
+    shell_session_memory_limit_mb: Optional[int] = None
     # Extras / Phase 4
     flake_check_runs: int = 0
     perf_command: Optional[str] = None
@@ -156,6 +160,8 @@ def _load_from_env(prefix: str = "DEVAGENT_") -> Dict[str, Any]:
             env[field] = int(value)
         elif field in {"patch_coverage_target"}:
             env[field] = float(value)
+        elif field == "shell_session_timeout":
+            env[field] = float(value)
         elif field == "state_file":
             env[field] = Path(value)
         elif field == "coverage_xml_path":
@@ -169,6 +175,8 @@ def _load_from_env(prefix: str = "DEVAGENT_") -> Dict[str, Any]:
                 env[field] = json.loads(value)
             except json.JSONDecodeError:
                 env[field] = {}
+        elif field in {"shell_session_cpu_time_limit", "shell_session_memory_limit_mb"}:
+            env[field] = int(value)
         else:
             env[field] = value
     return env

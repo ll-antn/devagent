@@ -505,13 +505,21 @@ def _make_tool_context(ctx: click.Context, *, with_sandbox: bool = False) -> Too
 
     structure_hints_state = _get_structure_hints_state(ctx)
 
+    extra: Dict[str, Any] = {"structure_hints": _export_structure_hints_state(structure_hints_state)}
+
+    shell_manager = ctx.obj.get("_shell_session_manager") if isinstance(ctx.obj, dict) else None
+    shell_session_id = ctx.obj.get("_shell_session_id") if isinstance(ctx.obj, dict) else None
+    if shell_manager and shell_session_id:
+        extra["shell_session_manager"] = shell_manager
+        extra["shell_session_id"] = shell_session_id
+
     return ToolContext(
         repo_root=Path.cwd(),
         settings=settings,
         sandbox=sandbox,
         devagent_config=devagent_cfg,
         metrics_collector=None,
-        extra={"structure_hints": _export_structure_hints_state(structure_hints_state)},
+        extra=extra,
     )
 
 

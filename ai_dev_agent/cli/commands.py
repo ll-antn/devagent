@@ -9,6 +9,7 @@ import click
 
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.logger import configure_logging, get_logger
+from ai_dev_agent.tools.execution.shell_session import ShellSessionError, ShellSessionManager
 
 from .react.executor import _execute_react_assistant
 from .utils import _build_context, get_llm_client, _record_invocation
@@ -125,34 +126,78 @@ def query(
 @click.pass_context
 def shell(ctx: click.Context) -> None:
     """Start an interactive shell session with persistent context."""
+    settings: Settings = ctx.obj["settings"]
+
+    manager = ShellSessionManager(
+        shell=getattr(settings, "shell_executable", None),
+        default_timeout=getattr(settings, "shell_session_timeout", None),
+        cpu_time_limit=getattr(settings, "shell_session_cpu_time_limit", None),
+        memory_limit_mb=getattr(settings, "shell_session_memory_limit_mb", None),
+    )
+
+    try:
+        session_id = manager.create_session(cwd=Path.cwd())
+    except ShellSessionError as exc:
+        raise click.ClickException(f"Failed to start shell session: {exc}") from exc
+
+    previous_manager = ctx.obj.get("_shell_session_manager")
+    previous_session = ctx.obj.get("_shell_session_id")
+    previous_history = ctx.obj.get("_shell_conversation_history")
+    ctx.obj["_shell_session_manager"] = manager
+    ctx.obj["_shell_session_id"] = session_id
+    ctx.obj["_shell_conversation_history"] = []
+
     click.echo("DevAgent Interactive Shell")
     click.echo("Type a question or command, 'help' for guidance, and 'exit' to quit.")
     click.echo("=" * 50)
 
-    while True:
-        try:
-            user_input = click.prompt("DevAgent> ", prompt_suffix="", show_default=False).strip()
-        except (KeyboardInterrupt, EOFError):
-            click.echo("\nGoodbye!")
-            break
+    try:
+        while True:
+            try:
+                user_input = click.prompt("DevAgent> ", prompt_suffix="", show_default=False).strip()
+            except (KeyboardInterrupt, EOFError):
+                click.echo("\nGoodbye!")
+                break
 
-        if not user_input:
-            continue
+            if not user_input:
+                continue
 
-        lowered = user_input.lower()
-        if lowered in {"exit", "quit", "q"}:
-            click.echo("Goodbye!")
-            break
+            lowered = user_input.lower()
+            if lowered in {"exit", "quit", "q"}:
+                click.echo("Goodbye!")
+                break
 
-        if lowered == "help":
-            click.echo("Enter any natural-language request to run `devagent query`.")
-            click.echo("Use 'exit' to leave the shell.")
-            continue
+            if lowered == "help":
+                click.echo("Enter any natural-language request to run `devagent query`.")
+                click.echo("Use 'exit' to leave the shell.")
+                continue
 
-        try:
-            ctx.invoke(query, prompt=(user_input,))
-        except click.ClickException as exc:
-            click.echo(f"Error: {exc}")
+            try:
+                ctx.invoke(query, prompt=(user_input,))
+            except ShellSessionError as exc:
+                click.echo(f"Shell session error: {exc}")
+                break
+            except TimeoutError as exc:
+                click.echo(f"Command timed out: {exc}")
+            except click.ClickException as exc:
+                click.echo(f"Error: {exc}")
+    finally:
+        if previous_manager is not None:
+            ctx.obj["_shell_session_manager"] = previous_manager
+        else:
+            ctx.obj.pop("_shell_session_manager", None)
+
+        if previous_session is not None:
+            ctx.obj["_shell_session_id"] = previous_session
+        else:
+            ctx.obj.pop("_shell_session_id", None)
+
+        if previous_history is not None:
+            ctx.obj["_shell_conversation_history"] = previous_history
+        else:
+            ctx.obj.pop("_shell_conversation_history", None)
+
+        manager.close_all()
 
 
 def main() -> None:

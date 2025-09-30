@@ -57,6 +57,33 @@ def _resolve_intent_router():
         return _DEFAULT_INTENT_ROUTER
     return getattr(cli_module, "IntentRouter", _DEFAULT_INTENT_ROUTER)
 
+
+def _truncate_shell_history(history: List[Message], max_turns: int) -> List[Message]:
+    """Keep only the most recent conversation turns within the configured budget."""
+
+    if max_turns <= 0:
+        return []
+
+    turns: List[tuple[Message, Message]] = []
+    pending_user: Message | None = None
+    for msg in history:
+        if msg.role == "user":
+            pending_user = msg
+        elif msg.role == "assistant" and msg.content is not None:
+            if pending_user is not None:
+                turns.append((pending_user, msg))
+                pending_user = None
+
+    trimmed: List[Message] = []
+    for user_msg, assistant_msg in turns[-max_turns:]:
+        trimmed.extend([user_msg, assistant_msg])
+
+    if pending_user is not None:
+        if not trimmed or trimmed[-1] is not pending_user:
+            trimmed.append(pending_user)
+
+    return trimmed
+
 def _execute_react_assistant(
     ctx: click.Context,
     client,
@@ -73,6 +100,18 @@ def _execute_react_assistant(
     supports_tool_calls = hasattr(client, "invoke_tools")
     should_emit_status = planning_active or supports_tool_calls or emit_status_requested
     execution_mode = "with planning" if planning_active else "direct"
+
+    user_message = Message(role="user", content=user_prompt)
+
+    history_messages: List[Message] = []
+    history_enabled = False
+    if isinstance(getattr(ctx, "obj", None), dict):
+        history_raw = ctx.obj.get("_shell_conversation_history")
+        if isinstance(history_raw, list):
+            history_messages = [msg for msg in history_raw if isinstance(msg, Message)]
+            history_enabled = True
+    max_history_turns = max(1, getattr(settings, "keep_last_assistant_messages", 4))
+    existing_history = list(history_messages)
 
     truncated_prompt = user_prompt if len(user_prompt) <= 50 else f"{user_prompt[:50]}..."
     direct_mode_announced = not planning_active if should_emit_status else True
@@ -108,6 +147,11 @@ def _execute_react_assistant(
             if text:
                 click.echo(text)
             execution_completed = True
+            if history_enabled:
+                updated = existing_history + [user_message]
+                if text:
+                    updated.append(Message(role="assistant", content=text))
+                ctx.obj["_shell_conversation_history"] = _truncate_shell_history(updated, max_history_turns)
             _finalize()
             return
 
@@ -116,6 +160,11 @@ def _execute_react_assistant(
             raise click.ClickException(f"Intent tool '{decision.tool}' is not supported yet.")
         handler(ctx, decision.arguments)
         execution_completed = True
+        if history_enabled:
+            ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
+                existing_history + [user_message],
+                max_history_turns,
+            )
         _finalize()
         return
 
@@ -284,7 +333,7 @@ def _execute_react_assistant(
                 + tool_guidance
             ),
         ),
-        Message(role="user", content=user_prompt),
+        user_message,
     ]
 
     project_structure = ctx.obj.get("_project_structure_summary")
@@ -300,6 +349,26 @@ def _execute_react_assistant(
                 role="system",
                 content="Project structure outline:\n" + project_structure,
             ),
+        )
+
+    if history_enabled and existing_history:
+        insert_at = len(messages) - 1
+        messages[insert_at:insert_at] = existing_history
+
+    history_start_index = len(messages) - 1
+
+    def _commit_shell_history() -> None:
+        if not history_enabled or not isinstance(ctx.obj, dict):
+            return
+        new_entries: List[Message] = []
+        if user_message.content:
+            new_entries.append(user_message)
+        for msg in messages[history_start_index + 1 :]:
+            if msg.role == "assistant" and msg.content and not msg.tool_calls:
+                new_entries.append(msg)
+        ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
+            existing_history + new_entries,
+            max_history_turns,
         )
 
     iteration = 0
@@ -379,6 +448,7 @@ def _execute_react_assistant(
                 else:
                     click.echo("I was unable to provide a complete answer.")
                 execution_completed = True
+                _commit_shell_history()
                 _finalize()
                 return
 
@@ -401,6 +471,7 @@ def _execute_react_assistant(
             if redundant_calls >= len(result.calls) * 0.7 and len(result.calls) > 1:
                 click.echo("🚫 Detected redundant tool usage. Stopping to avoid loops.")
                 execution_completed = True
+                _commit_shell_history()
                 _finalize()
                 return
 
@@ -542,6 +613,7 @@ def _execute_react_assistant(
             if consecutive_fails >= 3:
                 click.echo("🚫 Multiple consecutive tool failures. Stopping to avoid loops.")
                 execution_completed = True
+                _commit_shell_history()
                 _finalize()
                 return
 
@@ -569,6 +641,7 @@ def _execute_react_assistant(
             _handle_question_without_llm(user_prompt, reason="LLM unavailable")
             execution_mode = "direct"
             execution_completed = True
+            _commit_shell_history()
             _finalize()
             return
         except LLMError as exc:
@@ -577,6 +650,8 @@ def _execute_react_assistant(
         except Exception as exc:
             click.echo(f"❌ ReAct execution failed: {exc}")
             break
+
+    _commit_shell_history()
 
     if iteration >= iteration_cap:
         click.echo(f"⚠️  Reached maximum iteration limit ({iteration_cap}).")
