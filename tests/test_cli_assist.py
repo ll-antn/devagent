@@ -87,7 +87,7 @@ def assist_harness(tmp_path: Path, monkeypatch) -> AssistHarness:
 
     dummy_client = DummyClient()
     client_ref: dict[str, object] = {"client": dummy_client}
-    monkeypatch.setattr(cli_module, "_get_llm_client", lambda ctx: client_ref["client"])
+    monkeypatch.setattr(cli_module, "get_llm_client", lambda ctx: client_ref["client"])
 
     router_rules: list[Rule] = []
 

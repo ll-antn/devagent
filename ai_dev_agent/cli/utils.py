@@ -239,7 +239,7 @@ def _detect_repository_language(
     return language, count if count else None
 
 
-def _infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
+def infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
     """Infer target files for a task using commands, deliverables, and textual hints."""
     repo_root = repo_root.resolve()
     results: List[str] = []
@@ -307,7 +307,7 @@ def _infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
     return results
 
 
-def _update_task_state(
+def update_task_state(
     store: StateStore,
     plan: Dict[str, Any],
     task: Dict[str, Any],
@@ -478,7 +478,7 @@ def _record_invocation(ctx: click.Context, overrides: Optional[Dict[str, Any]] =
     state_obj.append_history(entry, limit=MAX_HISTORY_ENTRIES)
 
 
-def _get_llm_client(ctx: click.Context):
+def get_llm_client(ctx: click.Context):
     client = ctx.obj.get("llm_client")
     if client:
         return client
@@ -528,6 +528,10 @@ def _get_llm_client(ctx: click.Context):
     ctx.obj["llm_client"] = wrapped_client
     return wrapped_client
 
+# Backwards-compatible aliases for legacy imports
+_infer_task_files = infer_task_files
+_update_task_state = update_task_state
+_get_llm_client = get_llm_client
 
 __all__ = [
     "_resolve_repo_path",
@@ -538,8 +542,9 @@ __all__ = [
     "_merge_structure_hints_state",
     "_update_files_discovered",
     "_detect_repository_language",
-    "_infer_task_files",
-    "_update_task_state",
+    "infer_task_files",
+    "update_task_state",
+    "get_llm_client",
     "_create_sandbox",
     "_make_tool_context",
     "_invoke_registry_tool",
@@ -547,5 +552,8 @@ __all__ = [
     "_build_context",
     "_prompt_yes_no",
     "_record_invocation",
+    # Backwards-compat exports
+    "_infer_task_files",
+    "_update_task_state",
     "_get_llm_client",
 ]

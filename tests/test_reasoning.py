@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ai_dev_agent.cli import _update_task_state
+from ai_dev_agent.cli import update_task_state
 from ai_dev_agent.engine.planning.reasoning import TaskReasoning, ToolUse
 from ai_dev_agent.core.utils.state import StateStore
 
@@ -49,7 +49,7 @@ def test_update_task_state_persists_reasoning(tmp_path):
     step.complete("Done")
     reasoning.record_adjustment("Review follow-up", "Confirm documentation updates")
 
-    _update_task_state(store, plan, task, {"status": "completed"}, reasoning=reasoning)
+    update_task_state(store, plan, task, {"status": "completed"}, reasoning=reasoning)
 
     persisted = store.load()
     updated_task = persisted["last_plan"]["tasks"][0]

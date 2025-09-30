@@ -7,11 +7,11 @@ from typing import List, Optional, Tuple
 
 import click
 
-from ai_dev_agent.core.utils.config import Settings, load_settings
+from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.logger import configure_logging, get_logger
 
 from .react.executor import _execute_react_assistant
-from .utils import _build_context, _get_llm_client, _record_invocation
+from .utils import _build_context, get_llm_client, _record_invocation
 
 LOGGER = get_logger(__name__)
 
@@ -55,7 +55,9 @@ class NaturalLanguageGroup(click.Group):
 @click.pass_context
 def cli(ctx: click.Context, config_path: Path | None, verbose: bool, plan: bool) -> None:
     """AI-assisted development agent CLI."""
-    settings = load_settings(config_path)
+    from ai_dev_agent.cli import load_settings as _load_settings
+
+    settings = _load_settings(config_path)
     if verbose:
         settings.log_level = "DEBUG"
     configure_logging(settings.log_level, structured=settings.structured_logging)
@@ -109,9 +111,9 @@ def query(
 
     try:
         cli_pkg = import_module('ai_dev_agent.cli')
-        llm_factory = getattr(cli_pkg, '_get_llm_client', _get_llm_client)
+        llm_factory = getattr(cli_pkg, 'get_llm_client', get_llm_client)
     except ModuleNotFoundError:
-        llm_factory = _get_llm_client
+        llm_factory = get_llm_client
     try:
         client = llm_factory(ctx)
     except click.ClickException as exc:

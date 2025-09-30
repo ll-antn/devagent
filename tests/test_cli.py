@@ -3,7 +3,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import ai_dev_agent.cli as cli_module
-from ai_dev_agent.cli import _infer_task_files, cli
+from ai_dev_agent.cli import infer_task_files, cli
 from ai_dev_agent.cli.router import IntentDecision
 from ai_dev_agent.core.utils.config import Settings
 
@@ -20,7 +20,7 @@ def test_infer_task_files_from_commands(tmp_path: Path) -> None:
         ]
     }
 
-    inferred = _infer_task_files(task, tmp_path)
+    inferred = infer_task_files(task, tmp_path)
     assert inferred == ["ai_dev_agent/core.py"]
 
 
@@ -34,7 +34,7 @@ def test_infer_task_files_from_deliverables(tmp_path: Path) -> None:
         "deliverables": ["docs/overview.md", "docs/missing.md"],
     }
 
-    inferred = _infer_task_files(task, tmp_path)
+    inferred = infer_task_files(task, tmp_path)
     assert inferred == ["docs/overview.md"]
 
 
@@ -48,7 +48,7 @@ def test_infer_task_files_from_keywords(tmp_path: Path) -> None:
         "description": "Delete unused core module functionality from the project",
     }
 
-    inferred = _infer_task_files(task, tmp_path)
+    inferred = infer_task_files(task, tmp_path)
     assert inferred == ["ai_dev_agent/core.py"]
 
 
@@ -62,7 +62,7 @@ def test_infer_task_files_from_path_hints(tmp_path: Path) -> None:
         "description": "Ensure docs/guide.md reflects the new workflow",
     }
 
-    inferred = _infer_task_files(task, tmp_path)
+    inferred = infer_task_files(task, tmp_path)
     assert inferred == ["docs/guide.md"]
 
 
@@ -79,7 +79,7 @@ def test_cli_rejects_deprecated_list_directory_tool(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(cli_module, "load_settings", lambda path=None: settings)
 
     mock_client = object()
-    monkeypatch.setattr(cli_module, "_get_llm_client", lambda ctx: mock_client)
+    monkeypatch.setattr(cli_module, "get_llm_client", lambda ctx: mock_client)
 
     class DummyRouter:
         def __init__(self, client, settings_obj) -> None:
@@ -123,7 +123,7 @@ def test_query_command_invokes_router(monkeypatch, tmp_path: Path) -> None:
             return IntentDecision(tool=None, arguments={"text": "ok"})
 
     monkeypatch.setattr(cli_module, "IntentRouter", DummyRouter)
-    monkeypatch.setattr(cli_module, "_get_llm_client", lambda ctx: object())
+    monkeypatch.setattr(cli_module, "get_llm_client", lambda ctx: object())
     monkeypatch.chdir(repo_root)
 
     runner = CliRunner()
