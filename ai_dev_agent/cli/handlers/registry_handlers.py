@@ -62,7 +62,7 @@ def _build_code_search_payload(
     if "regex" in arguments:
         payload["regex"] = bool(arguments.get("regex"))
     else:
-        if any(ch in query for ch in ("|", "^", "$", "[", "]", "(", ")")):
+        if any(ch in query for ch in ("|", "^", "$", "[", "]", "(", ")", ".", "*")):
             payload["regex"] = True
 
     max_results = default_max_results
