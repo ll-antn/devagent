@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import time
 from importlib import import_module
@@ -90,6 +91,19 @@ def _emit_context_snapshot(messages: Sequence[Message], iteration: int) -> None:
     for index, msg in enumerate(messages, start=1):
         click.echo(f"   {index:02d}. {_format_message_preview(msg)}")
 
+
+
+def _summarize_arguments(arguments: Mapping[str, Any]) -> str:
+    if not arguments:
+        return "{}"
+    try:
+        raw = json.dumps(arguments, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        raw = str(dict(arguments))
+    raw = raw.replace("\n", " ").strip()
+    if len(raw) > 120:
+        return raw[:117] + "…"
+    return raw
 
 
 def _resolve_intent_router():
@@ -417,6 +431,7 @@ def _execute_react_assistant(
     file_reads: Set[str] = set()
     search_queries: Set[str] = set()
     tool_repeat_counts: Dict[str, int] = {}
+    failure_tracker: Dict[str, Dict[str, Any]] = {}
 
     def _normalize_read_targets(arguments: Dict[str, Any]) -> List[str]:
         targets: List[str] = []
@@ -448,22 +463,50 @@ def _execute_react_assistant(
             "- Aggregate results before presenting"
         )
 
+    core_instructions = (
+        "You are a helpful assistant for a software development CLI tool called devagent. "
+        "Use the available tools efficiently to answer the user's question. "
+        f"You have a budget of {iteration_cap} iterations to complete this task. "
+        "Plan your tool usage accordingly and prioritize synthesis as you approach the limit. "
+        "IMPORTANT GUIDELINES:\n"
+        "1. Choose the most appropriate tool for the task type\n"
+        "2. Avoid calling the same tool with identical arguments repeatedly\n"
+        "3. Don't read individual files when bulk operations are more efficient\n"
+        "4. When you have sufficient information, provide a final response WITHOUT calling more tools\n"
+        "5. If a tool fails, try a different approach rather than repeating\n"
+        "6. For file system operations, prefer shell commands over individual file reads\n"
+        "7. Generate scripts when you need to perform complex computations"
+    )
+
+    tool_reference = (
+        "\nTOOL GUIDE:\n"
+        "- exec: shell command runner. Supports pipes (|) and chaining; favour precise commands such as "
+        "`find . -maxdepth 1 -type f -print | wc -l`. Avoid repeating identical failing commands more than twice.\n"
+        "- fs.read / fs.write: inspect or modify targeted files when aggregation is not required.\n"
+        "- code.search: find patterns or symbols across the repository.\n"
+    )
+
+    quick_reference = (
+        "\nQUICK REFERENCE:\n"
+        "- File counts: use `exec` with `find . -maxdepth 1 -type f -print | wc -l` or list files and count locally.\n"
+        "- Enumerations: combine `code.search` filters with shell tools (e.g., `rg`, `find`).\n"
+        f"- Iteration budget: {iteration_cap} steps; summarise once you have enough evidence.\n"
+    )
+
+    failure_policy = (
+        "\nFAILURE HANDLING:\n"
+        "- If the same tool call fails twice, switch strategies instead of repeating it.\n"
+        "- The system will summarise repeated failures and block identical retries—only try again if inputs change meaningfully.\n"
+    )
+
     messages = [
         Message(
             role="system",
             content=(
-                "You are a helpful assistant for a software development CLI tool called devagent. "
-                "Use the available tools efficiently to answer the user's question. "
-                f"You have a budget of {iteration_cap} iterations to complete this task. "
-                f"Plan your tool usage accordingly and prioritize synthesis as you approach the limit. "
-                "IMPORTANT GUIDELINES:\n"
-                "1. Choose the most appropriate tool for the task type\n"
-                "2. Avoid calling the same tool with identical arguments repeatedly\n"
-                "3. Don't read individual files when bulk operations are more efficient\n"
-                "4. When you have sufficient information, provide a final response WITHOUT calling more tools\n"
-                "5. If a tool fails, try a different approach rather than repeating\n"
-                "6. For file system operations, prefer shell commands over individual file reads\n"
-                "7. Generate scripts when you need to perform complex computations"
+                core_instructions
+                + tool_reference
+                + quick_reference
+                + failure_policy
                 + tool_guidance
             ),
         ),
@@ -645,110 +688,160 @@ def _execute_react_assistant(
                     consecutive_fails += 1
                     continue
 
-                captured_output = io.StringIO()
                 repeat_count = tool_repeat_counts.get(call_signature, 0) + 1
                 tool_repeat_counts[call_signature] = repeat_count
 
+                captured_output = io.StringIO()
                 tool_output_for_message: Optional[str] = None
                 handler_result: Optional[Mapping[str, Any]] = None
                 call_success = False
                 start_call = time.time()
                 execution_time = 0.0
+                tool_output = ""
+                blocked_entry = failure_tracker.get(call_signature)
 
-                try:
-                    with contextlib.redirect_stdout(captured_output):
-                        handler_result = handler(ctx, tool_call.arguments)
-                    tool_output_raw = captured_output.getvalue()
-                    tool_output = tool_output_raw.strip() or "Tool executed successfully (no output)"
-
-                    max_chars = max(
-                        MIN_TOOL_OUTPUT_CHARS,
-                        getattr(settings, "max_tool_output_chars", DEFAULT_MAX_TOOL_OUTPUT_CHARS),
+                def _register_failure(outcome: str) -> str:
+                    failure_meta = failure_tracker.setdefault(
+                        call_signature,
+                        {"count": 0, "last_error": "", "summary_sent": False},
                     )
-                    summarized_output = summarize_text(tool_output, max_chars)
-                    if summarized_output != tool_output:
-                        summary_note = f" (truncated to {max_chars} chars)"
-                        artifact_reference = ""
-                        try:
-                            artifact_path = write_artifact(tool_output)
-                            try:
-                                display_path = artifact_path.relative_to(Path.cwd())
-                            except ValueError:
-                                display_path = artifact_path
-                            artifact_reference = f"\nFull output saved to {display_path}"
-                        except Exception:
+                    failure_meta["count"] = failure_meta.get("count", 0) + 1
+                    failure_meta["last_error"] = outcome
+                    failure_count = failure_meta["count"]
+                    summary_text_value = outcome
+                    if failure_count > 1:
+                        summary_text_value = (
+                            f"Repeated failure ({failure_count}x): "
+                            f"{summarize_text(outcome, 200)}"
+                        )
+                    if failure_count >= 2:
+                        failure_meta["blocked"] = True
+                        if not failure_meta.get("summary_sent"):
+                            arg_summary = _summarize_arguments(tool_call.arguments)
+                            error_summary = summarize_text(outcome, 160)
+                            advisory = (
+                                f"Repeated failure detected for {tool_call.name} with arguments {arg_summary}. "
+                                f"Last error: {error_summary}. Consider adjusting the approach (modify the command, switch tools, or break the task into smaller steps)."
+                            )
+                            messages.append(Message(role="system", content=advisory))
+                            failure_meta["summary_sent"] = True
+                    else:
+                        failure_meta.pop("blocked", None)
+                    return summary_text_value
+
+                if blocked_entry and blocked_entry.get("blocked"):
+                    failure_count = blocked_entry.get("count", 0)
+                    last_error = blocked_entry.get("last_error") or "Repeated failure detected"
+                    error_summary = summarize_text(str(last_error), 200)
+                    arg_summary = _summarize_arguments(tool_call.arguments)
+                    tool_output = (
+                        f"Skipped after {failure_count} repeated failures: {tool_call.name} {arg_summary}. "
+                        f"Last error: {error_summary}. Choose a different approach."
+                    )
+                    log_message = _format_enhanced_tool_log(
+                        tool_call,
+                        repeat_count,
+                        execution_time,
+                        tool_output,
+                        success=False,
+                        file_context=file_reading_context,
+                    )
+                    click.echo(log_message)
+                    tool_output_for_message = tool_output
+                    consecutive_fails += 1
+                else:
+                    try:
+                        with contextlib.redirect_stdout(captured_output):
+                            handler_result = handler(ctx, tool_call.arguments)
+                        tool_output_raw = captured_output.getvalue()
+                        tool_output = tool_output_raw.strip() or "Tool executed successfully (no output)"
+
+                        max_chars = max(
+                            MIN_TOOL_OUTPUT_CHARS,
+                            getattr(settings, "max_tool_output_chars", DEFAULT_MAX_TOOL_OUTPUT_CHARS),
+                        )
+                        summarized_output = summarize_text(tool_output, max_chars)
+                        if summarized_output != tool_output:
+                            summary_note = f" (truncated to {max_chars} chars)"
                             artifact_reference = ""
-                        tool_output_for_message = f"{summarized_output}{summary_note}{artifact_reference}"
-                    else:
-                        tool_output_for_message = tool_output
+                            try:
+                                artifact_path = write_artifact(tool_output)
+                                try:
+                                    display_path = artifact_path.relative_to(Path.cwd())
+                                except ValueError:
+                                    display_path = artifact_path
+                                artifact_reference = f"\nFull output saved to {display_path}"
+                            except Exception:
+                                artifact_reference = ""
+                            tool_output_for_message = f"{summarized_output}{summary_note}{artifact_reference}"
+                        else:
+                            tool_output_for_message = tool_output
 
-                    execution_time = time.time() - start_call
-                    log_message = _format_enhanced_tool_log(
-                        tool_call,
-                        repeat_count,
-                        execution_time,
-                        tool_output,
-                        success=True,
-                        file_context=file_reading_context,
-                    )
-                    click.echo(log_message)
+                        execution_time = time.time() - start_call
+                        log_message = _format_enhanced_tool_log(
+                            tool_call,
+                            repeat_count,
+                            execution_time,
+                            tool_output,
+                            success=True,
+                            file_context=file_reading_context,
+                        )
+                        click.echo(log_message)
 
-                    successful_calls += 1
-                    consecutive_fails = 0
-                    call_success = True
+                        successful_calls += 1
+                        consecutive_fails = 0
+                        call_success = True
+                        failure_tracker.pop(call_signature, None)
 
-                except FileNotFoundError as exc:
-                    execution_time = time.time() - start_call
-                    tool_output = f"File not found: {exc}"
-                    log_message = _format_enhanced_tool_log(
-                        tool_call,
-                        repeat_count,
-                        execution_time,
-                        tool_output,
-                        success=False,
-                        file_context=file_reading_context,
-                    )
-                    click.echo(log_message)
-                    consecutive_fails += 1
-                    tool_output_for_message = tool_output
-                    call_success = False
+                    except FileNotFoundError as exc:
+                        execution_time = time.time() - start_call
+                        tool_output = f"File not found: {exc}"
+                        log_message = _format_enhanced_tool_log(
+                            tool_call,
+                            repeat_count,
+                            execution_time,
+                            tool_output,
+                            success=False,
+                            file_context=file_reading_context,
+                        )
+                        click.echo(log_message)
+                        consecutive_fails += 1
+                        tool_output_for_message = _register_failure(tool_output)
 
-                except Exception as exc:
-                    execution_time = time.time() - start_call
-                    tool_output = f"Error executing {tool_call.name}: {exc}"
-                    log_message = _format_enhanced_tool_log(
-                        tool_call,
-                        repeat_count,
-                        execution_time,
-                        tool_output,
-                        success=False,
-                        file_context=file_reading_context,
-                    )
-                    click.echo(log_message)
-                    consecutive_fails += 1
-                    tool_output_for_message = tool_output
-                    call_success = False
+                    except Exception as exc:
+                        execution_time = time.time() - start_call
+                        tool_output = f"Error executing {tool_call.name}: {exc}"
+                        log_message = _format_enhanced_tool_log(
+                            tool_call,
+                            repeat_count,
+                            execution_time,
+                            tool_output,
+                            success=False,
+                            file_context=file_reading_context,
+                        )
+                        click.echo(log_message)
+                        consecutive_fails += 1
+                        tool_output_for_message = _register_failure(tool_output)
 
-                finally:
-                    strategy.record_tool_result(canonical_name, call_success, execution_time)
-                    tracker_entry = tool_success_tracker.setdefault(
-                        canonical_name,
-                        {
-                            "success": 0,
-                            "failure": 0,
-                            "total_duration": 0.0,
-                            "count": 0,
-                            "avg_duration": 0.0,
-                        },
-                    )
-                    tracker_entry["count"] = tracker_entry.get("count", 0) + 1
-                    if call_success:
-                        tracker_entry["success"] = tracker_entry.get("success", 0) + 1
-                    else:
-                        tracker_entry["failure"] = tracker_entry.get("failure", 0) + 1
-                    tracker_entry["total_duration"] = tracker_entry.get("total_duration", 0.0) + execution_time
-                    if tracker_entry["count"]:
-                        tracker_entry["avg_duration"] = tracker_entry["total_duration"] / tracker_entry["count"]
+                strategy.record_tool_result(canonical_name, call_success, execution_time)
+                tracker_entry = tool_success_tracker.setdefault(
+                    canonical_name,
+                    {
+                        "success": 0,
+                        "failure": 0,
+                        "total_duration": 0.0,
+                        "count": 0,
+                        "avg_duration": 0.0,
+                    },
+                )
+                tracker_entry["count"] = tracker_entry.get("count", 0) + 1
+                if call_success:
+                    tracker_entry["success"] = tracker_entry.get("success", 0) + 1
+                else:
+                    tracker_entry["failure"] = tracker_entry.get("failure", 0) + 1
+                tracker_entry["total_duration"] = tracker_entry.get("total_duration", 0.0) + execution_time
+                if tracker_entry["count"]:
+                    tracker_entry["avg_duration"] = tracker_entry["total_duration"] / tracker_entry["count"]
 
                 tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
                 tool_message = Message(

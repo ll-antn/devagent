@@ -14,10 +14,43 @@ from .shell_session import ShellSessionError, ShellSessionManager, ShellSessionT
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "tools"
 
 
+_SHELL_CONTROL_TOKENS = {"|", "||", "&&"}
+
+
+def _wrap_with_shell(command: str) -> list[str]:
+    if os.name == "nt":
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        return [comspec, "/S", "/C", command]
+
+    shell_path = os.environ.get("SHELL")
+    if not shell_path:
+        return ["/bin/sh", "-c", command]
+
+    shell_name = Path(shell_path).name.lower()
+    if shell_name in {"bash", "zsh", "fish", "ksh"}:
+        return [shell_path, "-lc", command]
+    return [shell_path, "-c", command]
+
+
+def _contains_shell_controls(tokens: Sequence[str]) -> bool:
+    for token in tokens:
+        if token in _SHELL_CONTROL_TOKENS:
+            return True
+    return False
+
+
 def _build_command(cmd: str, args: Sequence[str] | None) -> list[str]:
     if args:
-        return [cmd, *args]
-    return shlex.split(cmd)
+        tokens = [cmd, *args]
+        if _contains_shell_controls(tokens):
+            command = shlex.join(tokens)
+            return _wrap_with_shell(command)
+        return tokens
+
+    tokens = shlex.split(cmd)
+    if _contains_shell_controls(tokens):
+        return _wrap_with_shell(cmd)
+    return tokens
 
 
 def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, Any]:

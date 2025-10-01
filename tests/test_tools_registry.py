@@ -141,6 +141,18 @@ def test_exec_tool(tmp_path: Path) -> None:
     assert "hello" in result["stdout_tail"]
 
 
+def test_exec_tool_handles_pipes(tmp_path: Path) -> None:
+    ctx = _make_context(tmp_path)
+    (tmp_path / "one.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "two.txt").write_text("b", encoding="utf-8")
+
+    command = "find . -maxdepth 1 -type f -print | wc -l"
+    result = tool_registry.invoke("exec", {"cmd": command}, ctx)
+
+    assert result["exit_code"] == 0
+    assert result["stdout_tail"].strip() == "2"
+
+
 def test_security_secrets_scan(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
     secret_file = tmp_path / "config.txt"
