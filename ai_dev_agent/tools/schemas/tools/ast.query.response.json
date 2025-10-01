@@ -68,15 +68,19 @@
     }
   },
   "required": ["mode"],
-  "allOf": [
-    {
-      "if": { "properties": { "mode": { "const": "query" } } },
-      "then": { "required": ["nodes"] }
+  "if": {
+    "properties": { "mode": { "const": "query" } }
+  },
+  "then": {
+    "required": ["nodes"]
+  },
+  "else": {
+    "if": {
+      "properties": { "mode": { "const": "summary" } }
     },
-    {
-      "if": { "properties": { "mode": { "const": "summary" } } },
-      "then": { "required": ["summaries"] }
+    "then": {
+      "required": ["summaries"]
     }
-  ],
+  },
   "additionalProperties": false
 }

@@ -21,23 +21,14 @@
     "include_context": { "type": "boolean" }
   },
   "additionalProperties": false,
-  "allOf": [
-    {
-      "anyOf": [
-        { "required": ["path"] },
-        { "required": ["paths"] }
-      ]
-    },
-    {
-      "if": {
-        "properties": { "mode": { "const": "summary" } }
-      },
-      "then": {
-        "$comment": "Summary mode does not require a query."
-      },
-      "else": {
-        "required": ["query"]
-      }
-    }
-  ]
+  "if": {
+    "properties": { "mode": { "const": "summary" } }
+  },
+  "then": {
+    "$comment": "Summary mode accepts either 'path' or 'paths' and does not require 'query'."
+  },
+  "else": {
+    "$comment": "Query mode requires both 'path' and 'query'.",
+    "required": ["path", "query"]
+  }
 }
