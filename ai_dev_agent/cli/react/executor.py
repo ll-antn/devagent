@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import time
 from importlib import import_module
 from pathlib import Path
@@ -25,7 +26,6 @@ from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.context_budget import DEFAULT_MAX_TOOL_OUTPUT_CHARS, summarize_text
 from ai_dev_agent.core.utils.constants import MIN_TOOL_OUTPUT_CHARS
 from ai_dev_agent.core.utils.devagent_config import load_devagent_yaml
-from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.tool_utils import (
     FILE_READ_TOOLS,
     SEARCH_TOOLS,
@@ -34,7 +34,6 @@ from ai_dev_agent.core.utils.tool_utils import (
 )
 from ai_dev_agent.engine.planning.planner import Planner, PlanningContext
 from ai_dev_agent.engine.react.tool_strategy import (
-    TaskType,
     ToolContext as StrategyToolContext,
     ToolSelectionStrategy,
 )
@@ -106,6 +105,18 @@ def _summarize_arguments(arguments: Mapping[str, Any]) -> str:
     return raw
 
 
+def _extract_first_int(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    match = re.search(r"-?\d+", value)
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
 def _resolve_intent_router():
     try:
         cli_module = import_module("ai_dev_agent.cli")
@@ -163,6 +174,7 @@ def _execute_react_assistant(
         ctx.obj = {}
 
     ctx_obj: Dict[str, Any] = ctx.obj
+    ctx_obj["_low_count_verified"] = False
 
     history_messages: List[Message] = []
     history_enabled = False
@@ -271,33 +283,6 @@ def _execute_react_assistant(
         _finalize()
         return
 
-    task_keywords = set(extract_keywords(user_prompt)) if user_prompt else set()
-    query_lower = user_prompt.lower()
-    tool_task_type = strategy.detect_task_type(user_prompt)
-
-    enumerative_markers = [
-        "list", "show all", "find all", "enumerate", "which files", "what files",
-        "what methods", "which methods", "all methods", "every", "identify all",
-        "remove which", "candidates", "unused",
-    ]
-    computational_markers = ["count", "how many", "number of", "total", "sum"]
-    informational_markers = ["what is", "where is", "when", "who", "definition"]
-    research_markers = ["explain", "describe", "tell me about", "how does", "why"]
-
-    if any(marker in query_lower for marker in computational_markers):
-        task_type = "computational"
-    elif any(marker in query_lower for marker in enumerative_markers):
-        task_type = "enumeration"
-    elif tool_task_type in {TaskType.RESEARCH, TaskType.CODE_EXPLORATION} or any(
-        marker in query_lower for marker in research_markers
-    ):
-        task_type = "research"
-    elif tool_task_type == TaskType.TESTING:
-        task_type = "computational"
-    elif any(marker in query_lower for marker in informational_markers):
-        task_type = "informational"
-    else:
-        task_type = "general"
 
     devagent_cfg = ctx.obj.get("devagent_config")
     if devagent_cfg is None:
@@ -445,58 +430,93 @@ def _execute_react_assistant(
             targets.append(str(paths_value))
         return targets
 
-    tool_guidance = ""
-    if task_type == "computational":
-        tool_guidance = (
-            "\nFOR COMPUTATIONAL TASKS (counting, measuring, calculating):\n"
-            "- Prefer shell commands (sandbox_exec) for bulk file operations\n"
-            "- Generate and run scripts for complex computations\n"
-            "- Use 'find', 'wc', 'ls -la', etc. for file system analysis\n"
-            "- Avoid reading individual files when aggregate data is needed"
-        )
-    elif task_type == "enumeration":
-        tool_guidance = (
-            "\nFOR ENUMERATION TASKS (listing, finding all):\n"
-            "- Use code_search for finding patterns across files\n"
-            "- Use sandbox_exec for directory traversal and filtering\n"
-            "- Combine multiple search strategies if needed\n"
-            "- Aggregate results before presenting"
-        )
-
     core_instructions = (
-        "You are a helpful assistant for a software development CLI tool called devagent. "
-        "Use the available tools efficiently to answer the user's question. "
-        f"You have a budget of {iteration_cap} iterations to complete this task. "
-        "Plan your tool usage accordingly and prioritize synthesis as you approach the limit. "
-        "IMPORTANT GUIDELINES:\n"
-        "1. Choose the most appropriate tool for the task type\n"
-        "2. Avoid calling the same tool with identical arguments repeatedly\n"
-        "3. Don't read individual files when bulk operations are more efficient\n"
-        "4. When you have sufficient information, provide a final response WITHOUT calling more tools\n"
-        "5. If a tool fails, try a different approach rather than repeating\n"
-        "6. For file system operations, prefer shell commands over individual file reads\n"
-        "7. Generate scripts when you need to perform complex computations"
+        "You are a helpful assistant for the devagent CLI tool, specialized in efficient software development tasks.\n\n"
+        "## MISSION\n"
+        "Complete the user's task efficiently using available tools within {iteration_cap} iterations.\n\n"
+        "## CORE PRINCIPLES\n"
+        "1. EFFICIENCY: Choose the most appropriate tool for each task\n"
+        "2. AVOID REDUNDANCY: Never repeat identical tool calls\n"
+        "3. BULK OPERATIONS: Prefer batch operations over individual file reads\n"
+        "4. EARLY TERMINATION: Stop when you have sufficient information\n"
+        "5. ADAPTIVE STRATEGY: Change approach if tools fail\n"
+        "6. SCRIPT GENERATION: Create scripts for complex computations\n\n"
+        "## ITERATION MANAGEMENT\n"
+        f"- Current budget: {iteration_cap} iterations\n"
+        f"- At 75% usage ({int(iteration_cap * 0.75)} iterations): Begin consolidating findings\n"
+        f"- At 90% usage ({int(iteration_cap * 0.9)} iterations): Finalize answer\n"
     )
 
-    tool_reference = (
-        "\nTOOL GUIDE:\n"
-        "- exec: shell command runner. Supports pipes (|) and chaining; favour precise commands such as "
-        "`find . -maxdepth 1 -type f -print | wc -l`. Avoid repeating identical failing commands more than twice.\n"
-        "- fs.read / fs.write: inspect or modify targeted files when aggregation is not required.\n"
-        "- code.search: find patterns or symbols across the repository.\n"
+    language_hints = {
+        "python": "\n- Use ast_query for Python code structure\n- Check requirements.txt/setup.py for dependencies\n- Use import analysis for module relationships",
+        "javascript": "\n- Consider package.json for dependencies\n- Use ast_query for JS/TS structure\n- Check for .eslintrc for code standards",
+        "typescript": "\n- Check tsconfig.json for compilation settings\n- Use ast_query for TypeScript analysis\n- Consider type definitions in .d.ts files",
+        "java": "\n- Check pom.xml or build.gradle for dependencies\n- Use ast_query for class hierarchies\n- Consider package structure for organization",
+        "c++": "\n- Check CMakeLists.txt or Makefile for build config\n- Look for .h/.hpp headers separately from .cpp/.cc files\n- Use compile_commands.json if available",
+        "c": "\n- Check Makefile or CMakeLists.txt for build setup\n- Analyze header files (.h) for interfaces\n- Use grep for macro definitions",
+        "go": "\n- Check go.mod for module dependencies\n- Use go tools for analysis\n- Consider internal vs external packages",
+        "rust": "\n- Check Cargo.toml for dependencies\n- Use cargo commands for analysis\n- Consider module structure in lib.rs/main.rs",
+        "ruby": "\n- Check Gemfile for dependencies\n- Look for rake tasks\n- Consider Rails structure if applicable",
+        "php": "\n- Check composer.json for dependencies\n- Look for autoload configurations\n- Consider framework structure (Laravel, Symfony)",
+        "c#": "\n- Check .csproj or .sln files\n- Use NuGet packages info\n- Consider namespace organization",
+        "swift": "\n- Check Package.swift for dependencies\n- Look for .xcodeproj/xcworkspace\n- Consider iOS/macOS target differences",
+        "kotlin": "\n- Check build.gradle.kts for configuration\n- Consider Android vs JVM targets\n- Use Gradle for dependency info",
+        "scala": "\n- Check build.sbt for dependencies\n- Use sbt commands for analysis\n- Consider Play/Akka frameworks if present",
+        "dart": "\n- Check pubspec.yaml for dependencies\n- Consider Flutter structure if applicable\n- Use dart analyze for code issues",
+    }
+
+    if repository_language:
+        language_guidance = language_hints.get(repository_language.lower(), "")
+        if language_guidance:
+            core_instructions += f"\nLANGUAGE-SPECIFIC ({repository_language}):{language_guidance}\n"
+
+    tool_semantics = (
+        "\nTOOL SEMANTICS:\n"
+        "- exec: Runs commands in POSIX shell; pipes, globs, redirects work\n"
+        "- Prefer machine-parsable output (e.g., find -print0) over formatted listings\n"
+        "- Minimize tool calls - stop once you have the answer\n"
     )
 
-    quick_reference = (
-        "\nQUICK REFERENCE:\n"
-        "- File counts: use `exec` with `find . -maxdepth 1 -type f -print | wc -l` or list files and count locally.\n"
-        "- Enumerations: combine `code.search` filters with shell tools (e.g., `rg`, `find`).\n"
-        f"- Iteration budget: {iteration_cap} steps; summarise once you have enough evidence.\n"
+    output_discipline = (
+        "\nOUTPUT REQUIREMENTS:\n"
+        "- State scope explicitly (depth, hidden files, symlinks)\n"
+        "- Ensure counts match actual listed items\n"
+        "- Stop executing once you have sufficient information\n"
+    )
+
+    fs_quick_recipes = (
+        "\nCOMMON OPERATIONS:\n"
+        "Count files: `find . -maxdepth 1 -type f | wc -l`\n"
+        "List safely: `find . -maxdepth 1 -type f -print0 | xargs -0 -n1 basename`\n"
+        "Verify location: `pwd` and `ls -la`\n"
     )
 
     failure_policy = (
         "\nFAILURE HANDLING:\n"
-        "- If the same tool call fails twice, switch strategies instead of repeating it.\n"
-        "- The system will summarise repeated failures and block identical retries—only try again if inputs change meaningfully.\n"
+        "- First failure: Adjust parameters\n"
+        "- Second failure: Switch tools/approach\n"
+        "- System blocks identical calls after 2 failures\n"
+        "- 3+ consecutive failures trigger termination\n"
+    )
+
+    tool_guidance = (
+        "\nUNIVERSAL TOOL STRATEGIES:\n"
+        "- For counting/metrics: Use shell commands with find/grep/wc\n"
+        "- For pattern search: Start with code_search, then read specific files\n"
+        "- For exploration: Use ast_query for structure, symbols for definitions\n"
+        "- For bulk operations: Generate and execute scripts\n"
+        "- For file operations: Prefer find/xargs over individual reads\n"
+        "- Verify unexpected results (especially counts <=1) with pwd and ls -la\n"
+    )
+
+    tool_priority_guidance = (
+        "\nTOOL SELECTION GUIDE:\n"
+        "- Counting/metrics -> exec with scripts\n"
+        "- Pattern search -> code_search\n"
+        "- Code structure -> ast_query\n"
+        "- Specific files -> fs.read\n"
+        "- Bulk operations -> exec with find/xargs\n"
+        "- Complex analysis -> Generate analysis scripts\n"
     )
 
     messages = [
@@ -504,10 +524,12 @@ def _execute_react_assistant(
             role="system",
             content=(
                 core_instructions
-                + tool_reference
-                + quick_reference
+                + tool_semantics
+                + output_discipline
+                + fs_quick_recipes
                 + failure_policy
                 + tool_guidance
+                + tool_priority_guidance
             ),
         ),
         user_message,
@@ -524,7 +546,7 @@ def _execute_react_assistant(
             1,
             Message(
                 role="system",
-                content="Project structure outline:\n" + project_structure,
+                content=f"Project structure:\n{project_structure}",
             ),
         )
 
@@ -559,15 +581,49 @@ def _execute_react_assistant(
     while iteration < iteration_cap:
         iteration += 1
 
+        if iteration > 0 and iteration % 5 == 0:
+            progress_pct = (iteration / iteration_cap) * 100 if iteration_cap else 0.0
+            progress_msg = f"\n[Progress: {iteration}/{iteration_cap} iterations ({progress_pct:.0f}%)]"
+            if progress_pct >= 75:
+                progress_msg += " - Approaching limit, prioritize synthesis"
+            messages.append(Message(role="system", content=progress_msg))
+
+        if iteration > 5 and isinstance(tool_success_tracker, dict) and tool_success_tracker:
+            perf_summary: List[str] = []
+            for tool_name, stats in sorted(
+                tool_success_tracker.items(),
+                key=lambda item: item[1].get("success", 0),
+                reverse=True,
+            )[:5]:
+                count = stats.get("count", 0)
+                if count >= 2:
+                    success_rate = stats.get("success", 0) / count if count else 0.0
+                    perf_summary.append(f"  {tool_name}: {success_rate:.0%} success rate")
+            if perf_summary:
+                messages = [
+                    msg
+                    for msg in messages
+                    if not (
+                        msg.role == "system"
+                        and isinstance(msg.content, str)
+                        and msg.content.startswith("Tool performance this session:")
+                    )
+                ]
+                messages.insert(
+                    1,
+                    Message(
+                        role="system",
+                        content="Tool performance this session:\n" + "\n".join(perf_summary),
+                    ),
+                )
+
         strategy_context = StrategyToolContext(
-            task_type=tool_task_type,
             language=repository_language,
             has_symbol_index=has_symbol_index,
             files_discovered=set(files_discovered_set),
             tools_used=list(tool_history),
             last_tool_success=last_tool_success,
             iteration_count=iteration - 1,
-            task_keywords=set(task_keywords),
             repository_size=repository_size_estimate,
             iteration_budget=iteration_cap,
         )
@@ -691,14 +747,14 @@ def _execute_react_assistant(
                 repeat_count = tool_repeat_counts.get(call_signature, 0) + 1
                 tool_repeat_counts[call_signature] = repeat_count
 
-                captured_output = io.StringIO()
                 tool_output_for_message: Optional[str] = None
                 handler_result: Optional[Mapping[str, Any]] = None
                 call_success = False
-                start_call = time.time()
                 execution_time = 0.0
                 tool_output = ""
-                blocked_entry = failure_tracker.get(call_signature)
+
+                captured_output = io.StringIO()
+                start_call = time.time()
 
                 def _register_failure(outcome: str) -> str:
                     failure_meta = failure_tracker.setdefault(
@@ -717,10 +773,10 @@ def _execute_react_assistant(
                     if failure_count >= 2:
                         failure_meta["blocked"] = True
                         if not failure_meta.get("summary_sent"):
-                            arg_summary = _summarize_arguments(tool_call.arguments)
+                            arg_summary_inner = _summarize_arguments(tool_call.arguments)
                             error_summary = summarize_text(outcome, 160)
                             advisory = (
-                                f"Repeated failure detected for {tool_call.name} with arguments {arg_summary}. "
+                                f"Repeated failure detected for {tool_call.name} with arguments {arg_summary_inner}. "
                                 f"Last error: {error_summary}. Consider adjusting the approach (modify the command, switch tools, or break the task into smaller steps)."
                             )
                             messages.append(Message(role="system", content=advisory))
@@ -728,6 +784,8 @@ def _execute_react_assistant(
                     else:
                         failure_meta.pop("blocked", None)
                     return summary_text_value
+
+                blocked_entry = failure_tracker.get(call_signature)
 
                 if blocked_entry and blocked_entry.get("blocked"):
                     failure_count = blocked_entry.get("count", 0)
@@ -863,30 +921,29 @@ def _execute_react_assistant(
                 tool_history.append(canonical_name)
                 last_tool_success = call_success
 
+                if call_success and canonical_name == "exec":
+                    count_value = _extract_first_int(tool_output.strip())
+                    if (
+                        count_value is not None
+                        and count_value <= 1
+                        and not ctx.obj.get("_low_count_verified")
+                    ):
+                        guard_message = (
+                            f"⚠️ LOW COUNT DETECTED ({count_value}):\n"
+                            "Verify before finalizing:\n"
+                            "1. Check working directory: `pwd`\n"
+                            "2. List directory contents: `ls -la`\n"
+                            "This prevents false negatives.\n"
+                        )
+                        messages.append(Message(role="system", content=guard_message))
+                        ctx.obj["_low_count_verified"] = True
+
             if consecutive_fails >= 3:
                 click.echo("🚫 Multiple consecutive tool failures. Stopping to avoid loops.")
                 execution_completed = True
                 _commit_shell_history()
                 _finalize()
                 return
-
-            if (task_type == "informational" and iteration >= 6 and successful_calls >= 2) or (
-                task_type in ["computational", "enumeration"] and iteration >= 8 and successful_calls >= 3
-            ):
-                has_concrete_results = any(
-                    "completed" in str(msg.content).lower()
-                    or "found" in str(msg.content).lower()
-                    or "result" in str(msg.content).lower()
-                    for msg in messages[-3:]
-                    if hasattr(msg, "content") and msg.content
-                )
-
-                if has_concrete_results:
-                    hint_message = Message(
-                        role="user",
-                        content="Based on the information gathered above, please provide a complete answer to my original question.",
-                    )
-                    messages.append(hint_message)
 
         except (LLMConnectionError, LLMTimeoutError, LLMRetryExhaustedError) as exc:
             click.echo(f"⚠️  Unable to reach the LLM: {exc}")

@@ -43,7 +43,7 @@ class TaskType(Enum):
 @dataclass
 class ToolContext:
     """Context information for making intelligent tool selection decisions."""
-    task_type: TaskType
+    task_type: TaskType = TaskType.CODE_EXPLORATION
     language: Optional[str] = None
     has_symbol_index: bool = False
     files_discovered: Set[str] = field(default_factory=set)
