@@ -19,41 +19,6 @@ from ai_dev_agent.core.utils.text import (
     truncate_text,
 )
 
-def _provide_research_summary(messages: List[Any], client, settings: Settings) -> None:
-    """Provide a summary when research reaches limits or becomes redundant."""
-    from ..providers.llm.base import Message
-    from ..core.utils.context_budget import config_from_settings, ensure_context_budget
-
-    # Add synthesis request to the existing conversation for better context
-    synthesis_message = Message(
-        role="user",
-        content=(
-            "Based on all the information gathered above, please provide a "
-            "comprehensive answer to my original question. Synthesize all findings "
-            "into a clear, complete response."
-        )
-    )
-    
-    # Use the full conversation context for better synthesis
-    messages_with_synthesis = messages + [synthesis_message]
-    
-    # Reuse existing context budget management
-    config = config_from_settings(settings)
-    pruned_messages = ensure_context_budget(messages_with_synthesis, config)
-    
-    try:
-        final_result = client.complete(pruned_messages, temperature=0.1)
-        if final_result:
-            click.echo(final_result)
-        else:
-            # Fall back to existing summary builder if needed
-            fallback_summary = _build_fallback_tool_summary(messages)
-            click.echo(fallback_summary or "Unable to provide a complete summary.")
-    except Exception:
-        # Use existing fallback on any error
-        fallback_summary = _build_fallback_tool_summary(messages)
-        click.echo(fallback_summary or "Unable to provide a complete summary.")
-
 @dataclass
 class CodeLineSnippet:
     number: Optional[int]

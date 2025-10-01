@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 
 from ai_dev_agent.cli.utils import build_system_context
 from ai_dev_agent.core.utils.config import Settings
-from ai_dev_agent.core.utils.constants import LEGACY_TOOL_NAMES
 from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
 from ai_dev_agent.providers.llm.base import (
     LLMClient,
@@ -54,12 +53,10 @@ class IntentRouter:
     def _build_tool_list(self, settings: Settings) -> List[Dict[str, Any]]:
         """Combine core tools with selected registry tools, avoiding duplicates."""
         combined: List[Dict[str, Any]] = []
-        used_names = set(LEGACY_TOOL_NAMES)
+        used_names: set[str] = set()
         for entry in DEFAULT_TOOLS:
             fn = entry.get("function", {})
             name = fn.get("name")
-            if name in LEGACY_TOOL_NAMES:
-                continue
             if name:
                 used_names.add(name)
             combined.append(entry)
@@ -103,9 +100,6 @@ class IntentRouter:
             base_name = sanitize_tool_name(name)
             safe_name = base_name
             suffix = 1
-            if safe_name in LEGACY_TOOL_NAMES:
-                suffix += 1
-                safe_name = f"{base_name}_{suffix}"
             while safe_name in used_names:
                 suffix += 1
                 safe_name = f"{base_name}_{suffix}"

@@ -680,6 +680,20 @@ def _execute_react_assistant(
                 messages.append(assistant_message)
 
             if not result.calls:
+                # If we have tool_calls but no result.calls, we need to add dummy tool responses
+                # to satisfy the API conversation format requirements
+                if assistant_message.tool_calls:
+                    for tool_call in assistant_message.tool_calls:
+                        tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
+                        if tool_call_id:
+                            messages.append(
+                                Message(
+                                    role="tool",
+                                    content="Tool call was not executed.",
+                                    tool_call_id=tool_call_id,
+                                )
+                            )
+
                 if result.message_content:
                     click.echo(result.message_content)
                 else:

@@ -12,7 +12,13 @@ LOGGER = get_logger(__name__)
 
 
 @dataclass
-class TestResult:
+class TestExecutionResult:
+    """Result of a test execution.
+
+    Note: Not a pytest test class - used to store test command results.
+    """
+    __test__ = False  # Tell pytest this is not a test class
+
     command: List[str]
     returncode: int
     stdout: str
@@ -23,11 +29,15 @@ class TestResult:
         return self.returncode == 0
 
 
+# Backward compatibility alias
+TestResult = TestExecutionResult
+
+
 class TestRunner:
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
 
-    def run(self, command: Iterable[str]) -> TestResult:
+    def run(self, command: Iterable[str]) -> TestExecutionResult:
         cmd = list(command)
         LOGGER.info("Running tests: %s", " ".join(cmd))
         process = subprocess.run(
@@ -37,13 +47,7 @@ class TestRunner:
             stderr=subprocess.PIPE,
             text=True,
         )
-        return TestResult(command=cmd, returncode=process.returncode, stdout=process.stdout, stderr=process.stderr)
-
-    def run_pytest(self, extra_args: Iterable[str] | None = None) -> TestResult:
-        args = ["pytest"]
-        if extra_args:
-            args.extend(extra_args)
-        return self.run(args)
+        return TestExecutionResult(command=cmd, returncode=process.returncode, stdout=process.stdout, stderr=process.stderr)
 
 
-__all__ = ["TestResult", "TestRunner"]
+__all__ = ["TestExecutionResult", "TestResult", "TestRunner"]

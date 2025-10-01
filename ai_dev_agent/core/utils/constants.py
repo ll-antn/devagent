@@ -30,7 +30,6 @@ DEFAULT_MAX_TOOL_MESSAGES = 10
 DEFAULT_KEEP_LAST_ASSISTANT = 4
 
 # Legacy tool identifiers that should no longer surface externally
-LEGACY_TOOL_NAMES = frozenset()
 
 # Canonical tool definitions keep aliases and display names consistent
 TOOL_CANONICAL_SPECS = {
@@ -87,5 +86,3 @@ TOOL_CANONICAL_CATEGORIES = {
     for canonical_name, spec in TOOL_CANONICAL_SPECS.items()
 }
 
-# File extension patterns for context gathering
-CODE_EXTENSIONS = ["py", "md", "rst", "txt", "json", "yaml", "yml", "toml"]
