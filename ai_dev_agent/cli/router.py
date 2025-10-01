@@ -41,11 +41,15 @@ class IntentRouter:
         client: Optional[LLMClient],
         settings: Settings,
         tools: Optional[List[Dict[str, Any]]] = None,
+        project_profile: Optional[Dict[str, Any]] = None,
+        tool_success_history: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.client = client
         self.settings = settings
         self._system_context = build_system_context()
         self.tools = tools or self._build_tool_list(settings)
+        self.project_profile = project_profile or {}
+        self.tool_success_history = tool_success_history or {}
 
     def _build_tool_list(self, settings: Settings) -> List[Dict[str, Any]]:
         """Combine core tools with selected registry tools, avoiding duplicates."""
@@ -186,6 +190,10 @@ class IntentRouter:
             f"- Temp Directory: {ctx['temp_dir']}",
             f"- Platform Command Mappings: {command_mappings}",
             f"- Platform Examples: {ctx['platform_examples']}",
+            "PROJECT CONTEXT:",
+            *self._project_context_lines(workspace),
+            "TOOL PERFORMANCE SIGNALS:",
+            *self._tool_performance_lines(),
             "IMPORTANT:",
             f"- Use {'Unix' if ctx['is_unix'] else 'Windows'} command syntax and validate commands exist before invoking exec.",
             "- Never emit empty 'cmd' values for exec-related tools; include all required arguments.",
@@ -193,8 +201,87 @@ class IntentRouter:
             "- Locate files with 'code.search' or 'symbols.index' + 'symbols.find' before using 'fs.read'.",
             "- Use 'fs.read' with specific paths and optional 'context_lines' to keep outputs small.",
             f"- The repository root is at '{workspace}'. Return concise rationales when helpful.",
+            "- Exploit tools with higher historical success before falling back to slower options.",
+            "- When success rates are low or uncertain, capture rationale and propose safer alternatives.",
+            "- Stop early if the user's request is fulfilled; otherwise, escalate with a structured plan.",
         ]
         return "\n".join(lines)
+
+    def _project_context_lines(self, workspace: str) -> List[str]:
+        """Build prompt lines with repository-specific context for better routing."""
+
+        project = self.project_profile or {}
+        if not project:
+            return ["- Repository context not supplied; confirm assumptions when necessary."]
+
+        lines: List[str] = []
+        language = project.get("language") or project.get("dominant_language")
+        if language:
+            lines.append(f"- Dominant language: {language}")
+
+        repo_size = project.get("repository_size") or project.get("file_count")
+        if repo_size:
+            lines.append(f"- Approximate file count: {repo_size}")
+
+        plan_complexity = project.get("active_plan_complexity")
+        if plan_complexity:
+            lines.append(f"- Current plan complexity: {plan_complexity}")
+
+        recent_files = project.get("recent_files") or []
+        if isinstance(recent_files, list) and recent_files:
+            preview = ", ".join(str(item) for item in recent_files[:4])
+            if len(recent_files) > 4:
+                preview += ", …"
+            lines.append(f"- Recently touched files: {preview}")
+
+        style_notes = project.get("style_notes")
+        if style_notes:
+            lines.append(f"- Style highlights: {style_notes}")
+
+        summary = project.get("project_summary")
+        if summary:
+            flattened = " ".join(summary.split())
+            lines.append(f"- Structure summary: {flattened[:200]}{'…' if len(flattened) > 200 else ''}")
+
+        workspace_hint = project.get("workspace_root")
+        if workspace_hint and workspace_hint != workspace:
+            lines.append(f"- Override workspace root: {workspace_hint}")
+
+        return lines or ["- Repository context not supplied; confirm assumptions when necessary."]
+
+    def _tool_performance_lines(self) -> List[str]:
+        """Surface historical tool performance to steer selection."""
+
+        history = self.tool_success_history or {}
+        metrics: List[tuple[float, float, float, str]] = []
+
+        for name, raw in history.items():
+            if not isinstance(raw, dict):
+                continue
+            success = float(raw.get("success", 0))
+            failure = float(raw.get("failure", 0))
+            count = raw.get("count")
+            if count is None:
+                count = success + failure
+            if count <= 0:
+                continue
+            success_rate = success / count
+            avg_duration = float(raw.get("avg_duration", raw.get("total_duration", 0.0) / count if count else 0.0))
+            metrics.append((count, success_rate, avg_duration, name))
+
+        if not metrics:
+            return ["- No historical tool metrics captured; treat all tools as neutral."]
+
+        metrics.sort(reverse=True)
+        lines = []
+        for count, success_rate, avg_duration, name in metrics[:4]:
+            duration_text = f", avg {avg_duration:.1f}s" if avg_duration else ""
+            lines.append(f"- {name}: {success_rate:.0%} success over {int(count)} runs{duration_text}")
+
+        if len(metrics) > 4:
+            lines.append("- Additional tools tracked; use stored metrics when selecting fallbacks.")
+
+        return lines
 
     def _augment_exec_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         ctx = self._system_context

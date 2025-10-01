@@ -1,10 +1,12 @@
 """Enhanced code editing with iterative fix loops and intelligent context gathering."""
 from __future__ import annotations
 
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from ai_dev_agent.core.approval.approvals import ApprovalManager
 from ai_dev_agent.providers.llm import LLMClient, LLMError, Message
@@ -17,14 +19,21 @@ from .diff_utils import DiffError, DiffPreview, DiffProcessor
 LOGGER = get_logger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are a precise senior software engineer. Given a task description and current file contents, "
-    "produce a unified diff with the minimal changes required. Preserve existing formatting and style. "
-    "Focus on solving the specific problem described."
+    "You are a precise senior software engineer and code reviewer. Before proposing edits, infer the "
+    "repository's conventions, dependency impact, and quality expectations from the provided context. "
+    "Return the minimal unified diff that satisfies the task while preserving established patterns. "
+    "Think through potential regressions silently; output only the final diff."
 )
 
 USER_TEMPLATE = """
 Task Description:
 {task_description}
+
+Repository Signals:
+- Style Guide: {style_profile}
+- Dependency Impact: {dependency_profile}
+- Observed Patterns: {pattern_notes}
+- Quality Considerations: {quality_notes}
 
 Additional Guidance:
 {instructions}
@@ -36,12 +45,18 @@ Respond with a unified diff enclosed in ```diff fences. Only include files that 
 """
 
 FIX_TEMPLATE = """
-The previous implementation failed tests. Please analyze the error and provide a corrected diff.
+The previous implementation failed validation. Diagnose the failure using the signals below and deliver a corrected diff.
 
-Original Task:
+Task Context:
 {task_description}
 
-Previous Attempt:
+Repository Signals:
+- Style Guide: {style_profile}
+- Dependency Impact: {dependency_profile}
+- Observed Patterns: {pattern_notes}
+- Quality Considerations: {quality_notes}
+
+Previous Attempt Diff:
 {previous_diff}
 
 Test Results:
@@ -50,7 +65,7 @@ Test Results:
 Current File Contents:
 {file_blocks}
 
-Provide a corrected unified diff that addresses the test failures.
+Provide an updated unified diff that fixes the regression and adheres to the established conventions.
 """
 
 FILE_BLOCK_TEMPLATE = """
@@ -151,6 +166,12 @@ class CodeEditor:
         
         # Gather intelligent context
         contexts = self.gather_context(files, task_description)
+        code_contexts = self._filter_code_contexts(contexts)
+        style_profile = self._build_style_profile(code_contexts)
+        dependency_profile = self._build_dependency_summary(code_contexts)
+        latest_attempt = previous_attempts[-1] if previous_attempts else None
+        pattern_notes = self._identify_common_patterns(code_contexts)
+        quality_notes = self._build_quality_notes(code_contexts, task_description, latest_attempt)
         
         # Build the prompt
         if previous_attempts:
@@ -162,6 +183,10 @@ class CodeEditor:
                 previous_diff=latest_attempt.diff,
                 test_output=self._format_test_output(latest_attempt.test_result),
                 file_blocks=file_blocks,
+                style_profile=style_profile,
+                dependency_profile=dependency_profile,
+                pattern_notes=pattern_notes,
+                quality_notes=quality_notes,
             )
         else:
             # Initial implementation
@@ -170,6 +195,10 @@ class CodeEditor:
                 task_description=task_description,
                 instructions=extra_instructions or "No additional guidance",
                 file_blocks=file_blocks,
+                style_profile=style_profile,
+                dependency_profile=dependency_profile,
+                pattern_notes=pattern_notes,
+                quality_notes=quality_notes,
             )
         
         # Get LLM response
@@ -390,6 +419,215 @@ class CodeEditor:
             for context in contexts
         )
 
+    def _filter_code_contexts(self, contexts: List[FileContext]) -> List[FileContext]:
+        """Filter out synthetic or empty contexts when deriving repository signals."""
+        filtered: List[FileContext] = []
+        for context in contexts:
+            if context.reason == "project_structure_summary" or context.path.name == "__project_structure__.md":
+                continue
+            if not context.content.strip():
+                continue
+            filtered.append(context)
+        return filtered
+
+    def _build_style_profile(self, contexts: List[FileContext]) -> str:
+        """Infer indentation, quoting, and structural conventions from the provided files."""
+
+        if not contexts:
+            return "No dominant style detected from provided files; mirror local context."
+
+        indent_counter: Counter[str] = Counter()
+        space_widths: Counter[int] = Counter()
+        quote_counter: Counter[str] = Counter()
+        uses_type_hints = False
+        uses_dataclasses = False
+        uses_async = False
+
+        for context in contexts:
+            text = context.content
+            uses_dataclasses = uses_dataclasses or "@dataclass" in text
+            uses_type_hints = uses_type_hints or bool(re.search(r"def\s+\w+\(.*\)\s*->", text))
+            uses_async = uses_async or "async def" in text
+
+            quote_counter["double"] += text.count('"')
+            quote_counter["single"] += text.count("'")
+
+            for line in text.splitlines():
+                stripped = line.lstrip(" \t")
+                if not stripped:
+                    continue
+                prefix_length = len(line) - len(stripped)
+                prefix = line[:prefix_length]
+                if not prefix:
+                    continue
+                if "\t" in prefix:
+                    indent_counter["tabs"] += 1
+                else:
+                    indent_counter["spaces"] += 1
+                    space_widths[len(prefix)] += 1
+
+        style_fragments: List[str] = []
+
+        if indent_counter:
+            tab_count = indent_counter.get("tabs", 0)
+            space_count = indent_counter.get("spaces", 0)
+            if tab_count > space_count * 1.5:
+                style_fragments.append("Tab-indented codebase")
+            elif space_count:
+                common_width = max(space_widths, key=space_widths.get, default=4)
+                style_fragments.append(f"{common_width}-space indentation")
+
+        double_quotes = quote_counter.get("double", 0)
+        single_quotes = quote_counter.get("single", 0)
+        if double_quotes > single_quotes * 1.3:
+            style_fragments.append("Prefers double quotes")
+        elif single_quotes > double_quotes * 1.3:
+            style_fragments.append("Prefers single quotes")
+
+        if uses_type_hints:
+            style_fragments.append("Type hints in function signatures")
+        if uses_dataclasses:
+            style_fragments.append("Dataclass-heavy modules")
+        if uses_async:
+            style_fragments.append("Async/await usage present")
+
+        return "; ".join(style_fragments) if style_fragments else "No dominant style detected from provided files; mirror local context."
+
+    def _build_dependency_summary(self, contexts: List[FileContext]) -> str:
+        """Summarize external module usage for awareness of ripple effects."""
+
+        dependency_map: Dict[str, Counter[str]] = {}
+
+        for context in contexts:
+            try:
+                rel_path = str(context.path.relative_to(self.repo_root))
+            except ValueError:
+                rel_path = str(context.path)
+
+            counter = dependency_map.setdefault(rel_path, Counter())
+            suffix = context.path.suffix.lower()
+
+            for line in context.content.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                dependency: Optional[str] = None
+                if suffix in {".py", ".pyi"}:
+                    if stripped.startswith("from ") and " import " in stripped:
+                        dependency = stripped.split(" import ", 1)[0].replace("from", "", 1).strip()
+                    elif stripped.startswith("import "):
+                        dependency = stripped[len("import "):].split(" as ", 1)[0].strip()
+                elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
+                    if stripped.startswith("import "):
+                        if " from " in stripped:
+                            dependency = stripped.split(" from ", 1)[1].strip().rstrip(";").strip("'\"`")
+                        else:
+                            dependency = stripped[len("import "):].strip().rstrip(";")
+                    elif "require(" in stripped:
+                        match = re.search(r"require\(([^)]+)\)", stripped)
+                        if match:
+                            dependency = match.group(1).strip("'\"`")
+                elif suffix == ".go":
+                    if stripped.startswith("import "):
+                        dependency = stripped[len("import "):].strip().strip('"')
+                elif suffix == ".rs":
+                    if stripped.startswith("use "):
+                        dependency = stripped[4:].split(" as ", 1)[0].rstrip(";")
+
+                if dependency:
+                    counter[dependency] += 1
+
+        summaries: List[str] = []
+        for rel_path, counter in dependency_map.items():
+            if not counter:
+                continue
+            top_dependencies = ", ".join(dep for dep, _ in counter.most_common(3))
+            summaries.append(f"{rel_path}: {top_dependencies}")
+
+        if not summaries:
+            return "No external dependencies detected in the provided snippets."
+
+        return " | ".join(summaries[:4])
+
+    def _identify_common_patterns(self, contexts: List[FileContext]) -> str:
+        """Call out prevalent implementation patterns to guide the diff."""
+
+        if not contexts:
+            return "No dominant implementation patterns detected."
+
+        patterns: set[str] = set()
+        for context in contexts:
+            text = context.content
+            path_str = str(context.path)
+
+            if "@dataclass" in text:
+                patterns.add("dataclasses")
+            if "pydantic" in text:
+                patterns.add("pydantic models")
+            if "logging.getLogger" in text or "LOGGER =" in text:
+                patterns.add("centralized logging")
+            if "async def" in text:
+                patterns.add("async routines")
+            if "pytest" in text or "assert " in text and "tests" in path_str:
+                patterns.add("pytest-style tests")
+            if "click." in text:
+                patterns.add("Click CLI patterns")
+            if "Path(" in text:
+                patterns.add("pathlib usage")
+            if "typing." in text or "TypeVar" in text:
+                patterns.add("typing utilities")
+
+        return "; ".join(sorted(patterns)) if patterns else "No dominant implementation patterns detected."
+
+    def _build_quality_notes(
+        self,
+        contexts: List[FileContext],
+        task_description: Optional[str],
+        latest_attempt: Optional[FixAttempt],
+    ) -> str:
+        """Surface quality considerations, related tests, and recent failures."""
+
+        notes: List[str] = []
+
+        test_paths: List[str] = []
+        for context in contexts:
+            try:
+                rel_path = context.path.relative_to(self.repo_root)
+            except ValueError:
+                rel_path = context.path
+            rel_str = str(rel_path)
+            if "test" in rel_path.parts or rel_str.startswith("tests/") or rel_path.name.startswith("test_"):
+                test_paths.append(rel_str)
+
+            if "TODO" in context.content or "FIXME" in context.content:
+                notes.append(f"Outstanding TODO/FIXME in {rel_str}; verify if task addresses it.")
+
+        if test_paths:
+            display = ", ".join(test_paths[:3])
+            if len(test_paths) > 3:
+                display += ", …"
+            notes.append(f"Relevant tests: {display}")
+
+        if task_description:
+            lowered = task_description.lower()
+            if any(keyword in lowered for keyword in ("performance", "latency", "optimiz")):
+                notes.append("Assess runtime impact; add benchmarks or profiling if necessary.")
+            if any(keyword in lowered for keyword in ("security", "auth", "permission")):
+                notes.append("Validate security invariants and sanitise inputs.")
+
+        if latest_attempt and latest_attempt.test_result:
+            result = latest_attempt.test_result
+            try:
+                command_preview = " ".join(result.command)
+            except Exception:  # pragma: no cover - defensive
+                command_preview = "tests"
+            exit_code = getattr(result, "returncode", getattr(result, "exit_code", None))
+            if exit_code and exit_code != 0:
+                notes.append(f"Last test run `{command_preview}` failed (exit code {exit_code}).")
+
+        return " | ".join(notes) if notes else "No explicit quality blockers detected; still add tests when appropriate."
+
     def _format_test_output(self, test_result: Optional[TestResult]) -> str:
         """Format test output for inclusion in fix prompts."""
         if not test_result:
@@ -397,8 +635,9 @@ class CodeEditor:
         
         output_parts = []
         
-        if test_result.exit_code != 0:
-            output_parts.append(f"Exit code: {test_result.exit_code}")
+        exit_code = getattr(test_result, "returncode", getattr(test_result, "exit_code", 0))
+        if exit_code != 0:
+            output_parts.append(f"Exit code: {exit_code}")
         
         if test_result.stderr:
             output_parts.append(f"STDERR:\n{test_result.stderr[:2000]}...")  # Limit length

@@ -31,7 +31,7 @@ from ai_dev_agent.core.utils.tool_utils import (
     canonical_tool_name,
     tool_signature,
 )
-from ai_dev_agent.engine.planning.planner import Planner
+from ai_dev_agent.engine.planning.planner import Planner, PlanningContext
 from ai_dev_agent.engine.react.tool_strategy import (
     TaskType,
     ToolContext as StrategyToolContext,
@@ -103,13 +103,17 @@ def _execute_react_assistant(
 
     user_message = Message(role="user", content=user_prompt)
 
+    if not isinstance(getattr(ctx, "obj", None), dict):
+        ctx.obj = {}
+
+    ctx_obj: Dict[str, Any] = ctx.obj
+
     history_messages: List[Message] = []
     history_enabled = False
-    if isinstance(getattr(ctx, "obj", None), dict):
-        history_raw = ctx.obj.get("_shell_conversation_history")
-        if isinstance(history_raw, list):
-            history_messages = [msg for msg in history_raw if isinstance(msg, Message)]
-            history_enabled = True
+    history_raw = ctx_obj.get("_shell_conversation_history")
+    if isinstance(history_raw, list):
+        history_messages = [msg for msg in history_raw if isinstance(msg, Message)]
+        history_enabled = True
     max_history_turns = max(1, getattr(settings, "keep_last_assistant_messages", 4))
     existing_history = list(history_messages)
 
@@ -131,8 +135,51 @@ def _execute_react_assistant(
             mode_label = execution_mode
             click.echo(f"\n✅ Completed in {execution_time:.1f}s ({mode_label})")
 
+    repo_root = Path.cwd()
+    strategy = ToolSelectionStrategy()
+    structure_state = _get_structure_hints_state(ctx)
+
+    repository_language = ctx_obj.get("_detected_language")
+    repository_size_estimate = ctx_obj.get("_repo_file_count")
+    if repository_language is None or repository_size_estimate is None:
+        detected_language, file_count = _detect_repository_language(strategy, repo_root)
+        if repository_language is None:
+            repository_language = detected_language
+            ctx_obj["_detected_language"] = detected_language
+        if repository_size_estimate is None and file_count is not None:
+            repository_size_estimate = file_count
+            ctx_obj["_repo_file_count"] = file_count
+
+    tool_success_tracker = ctx_obj.setdefault("_tool_success_history", {})
+
+    if isinstance(tool_success_tracker, dict) and tool_success_tracker:
+        strategy.seed_aggregated_history(tool_success_tracker)
+
+    project_profile: Dict[str, Any] = {
+        "workspace_root": str(settings.workspace_root or repo_root),
+        "language": repository_language,
+        "repository_size": repository_size_estimate,
+        "project_summary": ctx_obj.get("_project_structure_summary"),
+        "active_plan_complexity": ctx_obj.get("_active_plan_complexity"),
+    }
+
+    discovered_files = structure_state.get("files") if isinstance(structure_state, dict) else {}
+    if isinstance(discovered_files, dict) and discovered_files:
+        project_profile["recent_files"] = sorted(discovered_files.keys())[:6]
+
+    style_notes = ctx_obj.get("_latest_style_profile")
+    if style_notes:
+        project_profile["style_notes"] = style_notes
+
+    project_profile = {key: value for key, value in project_profile.items() if value}
+
     router_cls = _resolve_intent_router()
-    router = router_cls(client, settings)
+    router = router_cls(
+        client,
+        settings,
+        project_profile=project_profile,
+        tool_success_history=ctx_obj.get("_tool_success_history"),
+    )
     available_tools = getattr(router, "tools", [])
 
     if not supports_tool_calls:
@@ -167,20 +214,6 @@ def _execute_react_assistant(
             )
         _finalize()
         return
-
-    strategy = ToolSelectionStrategy()
-    structure_state = _get_structure_hints_state(ctx)
-    repo_root = Path.cwd()
-    repository_language = ctx.obj.get("_detected_language")
-    repository_size_estimate = ctx.obj.get("_repo_file_count")
-    if repository_language is None or repository_size_estimate is None:
-        detected_language, file_count = _detect_repository_language(strategy, repo_root)
-        if repository_language is None:
-            repository_language = detected_language
-            ctx.obj["_detected_language"] = detected_language
-        if repository_size_estimate is None:
-            repository_size_estimate = file_count
-            ctx.obj["_repo_file_count"] = file_count
 
     task_keywords = set(extract_keywords(user_prompt)) if user_prompt else set()
     query_lower = user_prompt.lower()
@@ -252,8 +285,67 @@ def _execute_react_assistant(
                 ctx.obj["_project_structure_summary"] = project_structure
             if project_structure:
                 structure_state["project_summary"] = project_structure
+            tool_history = ctx_obj.get("_tool_success_history") or {}
+            historical_success = None
+            recent_failures = None
+            if isinstance(tool_history, dict) and tool_history:
+                metrics: List[tuple[float, float, str]] = []
+                for name, stats in tool_history.items():
+                    if not isinstance(stats, dict):
+                        continue
+                    success = float(stats.get("success", 0))
+                    failure = float(stats.get("failure", 0))
+                    total = success + failure
+                    if total <= 0:
+                        continue
+                    rate = success / total
+                    metrics.append((rate, total, name))
+                if metrics:
+                    metrics.sort(reverse=True)
+                    top_samples = [
+                        f"{name} ({rate:.0%} of {int(total)} runs)"
+                        for rate, total, name in metrics[:3]
+                    ]
+                    historical_success = ", ".join(top_samples)
+                    low_samples = [
+                        f"{name} ({rate:.0%} of {int(total)} runs)"
+                        for rate, total, name in metrics
+                        if rate < 0.45
+                    ]
+                    if low_samples:
+                        recent_failures = ", ".join(low_samples[:3])
+
+            repo_metrics_parts = []
+            if repository_size_estimate:
+                repo_metrics_parts.append(f"Approximate file count: {repository_size_estimate}")
+            repo_metrics_parts.append(f"Workspace root: {repo_root}")
+            repository_metrics_text = "; ".join(repo_metrics_parts)
+
+            dependency_overview = None
+            if isinstance(discovered_files, dict) and discovered_files:
+                dependency_overview = ", ".join(sorted(discovered_files.keys())[:6])
+
+            planning_context = PlanningContext(
+                project_structure=project_structure,
+                repository_metrics=repository_metrics_text or None,
+                dominant_language=repository_language,
+                dependency_landscape=dependency_overview,
+                code_conventions=style_notes,
+                historical_success=historical_success,
+                recent_failures=recent_failures,
+                related_components=dependency_overview,
+            )
+
             planner = Planner(client)
-            structured_plan = planner.generate(user_prompt, project_structure=project_structure)
+            structured_plan = planner.generate(
+                user_prompt,
+                project_structure=project_structure,
+                context=planning_context,
+            )
+            if structured_plan.complexity:
+                ctx_obj["_active_plan_complexity"] = structured_plan.complexity
+            if structured_plan.success_criteria:
+                ctx_obj["_latest_plan_success_criteria"] = structured_plan.success_criteria
         except LLMError as exc:
             click.echo(f"Planner unavailable: {exc}. Switching to direct execution.")
             planning_active = False
@@ -514,9 +606,10 @@ def _execute_react_assistant(
                 tool_output_for_message: Optional[str] = None
                 handler_result: Optional[Mapping[str, Any]] = None
                 call_success = False
+                start_call = time.time()
+                execution_time = 0.0
 
                 try:
-                    start_call = time.time()
                     with contextlib.redirect_stdout(captured_output):
                         handler_result = handler(ctx, tool_call.arguments)
                     tool_output_raw = captured_output.getvalue()
@@ -559,7 +652,7 @@ def _execute_react_assistant(
                     call_success = True
 
                 except FileNotFoundError as exc:
-                    execution_time = time.time() - start_time
+                    execution_time = time.time() - start_call
                     tool_output = f"File not found: {exc}"
                     log_message = _format_enhanced_tool_log(
                         tool_call,
@@ -575,7 +668,7 @@ def _execute_react_assistant(
                     call_success = False
 
                 except Exception as exc:
-                    execution_time = time.time() - start_time
+                    execution_time = time.time() - start_call
                     tool_output = f"Error executing {tool_call.name}: {exc}"
                     log_message = _format_enhanced_tool_log(
                         tool_call,
@@ -589,6 +682,27 @@ def _execute_react_assistant(
                     consecutive_fails += 1
                     tool_output_for_message = tool_output
                     call_success = False
+
+                finally:
+                    strategy.record_tool_result(canonical_name, call_success, execution_time)
+                    tracker_entry = tool_success_tracker.setdefault(
+                        canonical_name,
+                        {
+                            "success": 0,
+                            "failure": 0,
+                            "total_duration": 0.0,
+                            "count": 0,
+                            "avg_duration": 0.0,
+                        },
+                    )
+                    tracker_entry["count"] = tracker_entry.get("count", 0) + 1
+                    if call_success:
+                        tracker_entry["success"] = tracker_entry.get("success", 0) + 1
+                    else:
+                        tracker_entry["failure"] = tracker_entry.get("failure", 0) + 1
+                    tracker_entry["total_duration"] = tracker_entry.get("total_duration", 0.0) + execution_time
+                    if tracker_entry["count"]:
+                        tracker_entry["avg_duration"] = tracker_entry["total_duration"] / tracker_entry["count"]
 
                 tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
                 tool_message = Message(

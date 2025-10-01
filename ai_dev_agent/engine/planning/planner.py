@@ -18,37 +18,93 @@ from ai_dev_agent.core.utils.logger import get_logger
 
 LOGGER = get_logger(__name__)
 
-SYSTEM_PROMPT = """You are a planning assistant. Generate appropriate plans based on task complexity.
-Be practical and thorough. Simple tasks need 2-5 steps, complex tasks may need 6-15 steps.
-Always respond with a JSON object containing the plan and nothing else."""
+SYSTEM_PROMPT = """You are the planning strategist for DevAgent. Build executable engineering plans that
+balance speed with reliability.
 
-USER_TEMPLATE = """Create a plan for: {goal}
+Key responsibilities:
+- Classify task complexity (simple, medium, complex) using the goal, repository metrics, and
+  dependency risk. Match the number of steps accordingly (simple: 2-5, medium: 6-10, complex: 8-15).
+- Leverage repository architecture, code conventions, and prior outcomes to suggest proven
+  implementation patterns.
+- Anticipate integration, testing, and rollout tasks. Include validation or rollback steps when risk
+  is non-trivial.
+- Think through the problem step-by-step, but only output the final JSON plan.
+- Respond with JSON only—no extra commentary, code blocks, or markdown fences."""
 
-Respond with JSON:
+
+USER_TEMPLATE = """Goal:
+{goal}
+
+Context Snapshot:
+{context_block}
+
+Planning Requirements:
+- Produce an end-to-end sequence that delivers the goal with measurable checkpoints.
+- Highlight any setup, validation, or follow-up tasks needed to ship safely.
+- Reference relevant repository patterns or modules when naming tasks.
+- Surface assumptions that must be validated before execution.
+- Flag tasks requiring coordination (e.g., migrations, cross-team approvals).
+
+Output strictly valid JSON matching:
 {{
   "summary": "One-line summary",
+  "complexity": "simple|medium|complex",
+  "success_criteria": ["List concrete completion checks"],
   "tasks": [
     {{
       "step_number": 1,
-      "title": "Short title",
-      "description": "What to do (1-2 sentences max)",
-      "dependencies": []
+      "title": "Short actionable title",
+      "description": "What to do (1-2 sentences)",
+      "dependencies": [],
+      "deliverables": [],
+      "risk_mitigation": "Optional notes"
     }}
   ]
 }}
-
-Guidelines:
-- Match plan complexity to task complexity:
-  * Simple tasks (basic queries, single file changes): 2-5 steps
-  * Medium tasks (feature additions, refactoring): 6-10 steps  
-  * Complex tasks (architecture changes, multi-component work): 8-15 steps
-- Keep descriptions clear and practical
-- Include all necessary steps for thorough completion
-- Break down complex work into logical, manageable chunks
-- Ensure dependencies are properly sequenced
 """
 
 JSON_PATTERN = re.compile(r"```json\s*(?P<json>{.*?})\s*```", re.DOTALL)
+
+
+@dataclass
+class PlanningContext:
+    """Supplemental signals used to enrich planner prompts."""
+
+    project_structure: Optional[str] = None
+    repository_metrics: Optional[str] = None
+    dominant_language: Optional[str] = None
+    dependency_landscape: Optional[str] = None
+    code_conventions: Optional[str] = None
+    quality_metrics: Optional[str] = None
+    historical_success: Optional[str] = None
+    recent_failures: Optional[str] = None
+    risk_register: Optional[str] = None
+    related_components: Optional[str] = None
+
+    def as_prompt_block(self) -> str:
+        """Render a compact multi-section context block for the planner prompt."""
+
+        sections: List[str] = []
+
+        def _add(label: str, value: Optional[str]) -> None:
+            normalized = (value or "Not available").strip()
+            sections.append(f"{label}:\n{normalized}")
+
+        _add("Repository Metrics", self.repository_metrics)
+        _add("Primary Language", self.dominant_language)
+        _add("Dependency Landscape", self.dependency_landscape)
+        _add("Code Conventions", self.code_conventions)
+        _add("Quality & Coverage Signals", self.quality_metrics)
+        _add("Historical Success Patterns", self.historical_success)
+        _add("Recent Failures or Regressions", self.recent_failures)
+        _add("Risk Register", self.risk_register)
+        _add("Related Components or Modules", self.related_components)
+
+        if self.project_structure:
+            structure = self.project_structure.strip()
+            sections.append(f"Project Structure Outline:\n{structure}")
+
+        return "\n\n".join(sections)
 
 
 @dataclass
@@ -63,6 +119,7 @@ class PlanTask:
     reach: int | None = None
     impact: int | None = None
     confidence: float | None = None
+    risk_mitigation: str | None = None
     deliverables: List[str] = field(default_factory=list)
     commands: List[str] = field(default_factory=list)
     identifier: InitVar[str | None] = None
@@ -109,6 +166,7 @@ class PlanTask:
             "confidence": self.confidence,
             "deliverables": self.deliverables,
             "commands": self.commands,
+            "risk_mitigation": self.risk_mitigation,
         }
         for key, value in optional_fields.items():
             if value not in (None, [], {}):
@@ -123,6 +181,9 @@ class PlanResult:
     raw_response: str
     fallback_reason: str | None = None
     project_structure: Optional[str] = None
+    context_snapshot: Optional[str] = None
+    complexity: Optional[str] = None
+    success_criteria: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         data = {
@@ -135,6 +196,12 @@ class PlanResult:
         }
         if self.project_structure:
             data["project_structure"] = self.project_structure
+        if self.context_snapshot:
+            data["context_snapshot"] = self.context_snapshot
+        if self.complexity:
+            data["complexity"] = self.complexity
+        if self.success_criteria:
+            data["success_criteria"] = self.success_criteria
         return data
 
 
@@ -144,14 +211,24 @@ class Planner:
     def __init__(self, client: LLMClient) -> None:
         self.client = client
 
-    def generate(self, goal: str, project_structure: Optional[str] = None) -> PlanResult:
+    def generate(
+        self,
+        goal: str,
+        project_structure: Optional[str] = None,
+        context: Optional[PlanningContext] = None,
+    ) -> PlanResult:
         LOGGER.info("Requesting plan from LLM for goal: %s", goal)
-        user_prompt = USER_TEMPLATE.format(goal=goal.strip())
-        if project_structure:
-            user_prompt = (
-                f"{user_prompt}\n\nProject structure overview (keep in mind when planning):\n"
-                f"{project_structure}"
-            )
+        plan_context = context or PlanningContext()
+        if plan_context.project_structure is None and project_structure:
+            plan_context.project_structure = project_structure
+        if plan_context.dominant_language is None:
+            plan_context.dominant_language = "Unknown"
+
+        context_block = plan_context.as_prompt_block()
+        user_prompt = USER_TEMPLATE.format(
+            goal=goal.strip(),
+            context_block=context_block,
+        )
 
         messages: Sequence[Message] = (
             Message(role="system", content=SYSTEM_PROMPT),
@@ -189,6 +266,9 @@ class Planner:
                 raw_response="",
                 fallback_reason=str(exc),
                 project_structure=project_structure,
+                context_snapshot=context_block,
+                complexity=None,
+                success_criteria=[],
             )
         try:
             payload = self._extract_json(response_text)
@@ -196,12 +276,23 @@ class Planner:
             raise LLMError(f"Planner response was not valid JSON: {exc}") from exc
         tasks = [self._task_from_dict(entry, idx) for idx, entry in enumerate(payload.get("tasks", []), 1)]
         summary = payload.get("summary", goal)
+        complexity = payload.get("complexity")
+        criteria_raw = payload.get("success_criteria") or []
+        if isinstance(criteria_raw, (str, bytes)):
+            success_criteria = [str(criteria_raw)]
+        elif isinstance(criteria_raw, list):
+            success_criteria = [str(item) for item in criteria_raw if item]
+        else:
+            success_criteria = []
         return PlanResult(
             goal=goal,
             summary=summary,
             tasks=tasks,
             raw_response=response_text,
             project_structure=project_structure,
+            context_snapshot=context_block,
+            complexity=str(complexity) if complexity else None,
+            success_criteria=success_criteria,
         )
 
     def _extract_json(self, text: str) -> dict:
@@ -241,6 +332,7 @@ class Planner:
             deliverables=[str(item) for item in deliverables],
             commands=[str(item) for item in commands],
             identifier=data.get("id") or data.get("identifier"),
+            risk_mitigation=data.get("risk_mitigation"),
         )
 
     def _create_generic_fallback(self, goal: str) -> List[PlanTask]:

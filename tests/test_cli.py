@@ -82,9 +82,10 @@ def test_cli_rejects_deprecated_list_directory_tool(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(cli_module, "get_llm_client", lambda ctx: mock_client)
 
     class DummyRouter:
-        def __init__(self, client, settings_obj) -> None:
+        def __init__(self, client, settings_obj, **kwargs) -> None:
             self.client = client
             self.settings = settings_obj
+            self.extra = kwargs
 
         def route(self, prompt: str) -> IntentDecision:
             assert "дир" in prompt
@@ -114,9 +115,10 @@ def test_query_command_invokes_router(monkeypatch, tmp_path: Path) -> None:
     captures = {}
 
     class DummyRouter:
-        def __init__(self, client, settings_obj) -> None:
+        def __init__(self, client, settings_obj, **kwargs) -> None:
             self.client = client
             self.settings = settings_obj
+            self.extra = kwargs
 
         def route(self, prompt: str) -> IntentDecision:
             captures.setdefault("prompt", prompt)

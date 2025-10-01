@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ai_dev_agent.core.tree_sitter import (
     build_capture_query,
@@ -132,6 +132,7 @@ class ToolSelectionStrategy:
     def __init__(self):
         """Initialize the tool selection strategy."""
         self.tool_performance: Dict[str, List[Tuple[bool, float]]] = {}
+        self.aggregated_history: Dict[str, Dict[str, float]] = {}
         self.context_history: List[ToolContext] = []
         self.redundant_tool_threshold = 3  # Max same tool in a row
         
@@ -214,23 +215,28 @@ class ToolSelectionStrategy:
     
     def _apply_context_rules(self, tools: List[str], context: ToolContext) -> List[str]:
         """Apply intelligent context-based filtering and reordering."""
-        
+
         # Rule 1: If no symbol index and exploring code, prioritize indexing
         if (context.task_type == TaskType.CODE_EXPLORATION and 
             not context.has_symbol_index and 
             "symbols.index" in tools):
-            
+
             # Move symbols.index to front unless we're in a very small repo
             if not context.repository_size or context.repository_size > 10:
                 tools = ["symbols.index"] + [t for t in tools if t != "symbols.index"]
-        
+
         # Rule 2: Avoid tool repetition (anti-loop protection)
-        if context.tools_used and len(context.tools_used) >= self.redundant_tool_threshold:
-            recent_tools = context.tools_used[-self.redundant_tool_threshold:]
+        dynamic_threshold = _get_relative_threshold(context.iteration_budget, 0.12, minimum=2)
+        if context.repository_size and context.repository_size > 800:
+            dynamic_threshold = max(2, dynamic_threshold - 1)
+        effective_threshold = max(2, min(dynamic_threshold, 5))
+
+        if context.tools_used and len(context.tools_used) >= effective_threshold:
+            recent_tools = context.tools_used[-effective_threshold:]
             if len(set(recent_tools)) == 1:  # Same tool repeated
                 repeated_tool = recent_tools[0]
                 tools = [t for t in tools if t != repeated_tool] + [repeated_tool]
-        
+
         # Rule 3: If last tool failed, try alternatives
         if not context.last_tool_success and context.tools_used:
             failed_tool = context.tools_used[-1]
@@ -256,11 +262,11 @@ class ToolSelectionStrategy:
             targeted_tools = ["symbols.find", "ast.query", "fs.read"]
             tools = [t for t in tools if t in targeted_tools] + [t for t in tools if t not in targeted_tools]
 
-        return tools
+        return self._apply_performance_bias(tools)
     
     def _apply_language_preferences(self, tools: List[str], language: str) -> List[str]:
         """Adjust tool order based on language-specific strengths."""
-        
+
         language = language.lower()
         if language in self.LANGUAGE_TOOL_PREFERENCES:
             preferred = self.LANGUAGE_TOOL_PREFERENCES[language]
@@ -279,6 +285,71 @@ class ToolSelectionStrategy:
             return reordered
         
         return tools
+
+    def _apply_performance_bias(self, tools: List[str]) -> List[str]:
+        """Reorder tools using observed success rates and latency."""
+
+        if not tools:
+            return tools
+
+        scored: List[tuple[float, int, str]] = []
+        for index, tool in enumerate(tools):
+            history = self.tool_performance.get(tool)
+            aggregated = self.aggregated_history.get(tool)
+            if not history and aggregated:
+                count = aggregated.get("count", 0.0)
+                success_rate = aggregated.get("success_rate", 0.5)
+                avg_duration = aggregated.get("avg_duration", 1.0)
+                confidence = min(1.0, count / 6.0)
+                duration_score = max(0.0, min(1.0, 3.0 / (avg_duration + 0.1)))
+                base_score = 0.7 * success_rate + 0.3 * duration_score
+                score = 0.5 + confidence * (base_score - 0.5)
+                scored.append((score, -index, tool))
+                continue
+
+            if not history:
+                # Neutral prior with slight bias towards original order
+                scored.append((0.5, -index, tool))
+                continue
+
+            successes = sum(1 for success, _ in history if success)
+            count = len(history)
+            if count == 0:
+                scored.append((0.5, -index, tool))
+                continue
+
+            success_rate = successes / count
+            avg_duration = sum(duration for _, duration in history) / count
+            # Normalise duration to [0,1]; faster tools get slightly higher scores
+            duration_score = max(0.0, min(1.0, 3.0 / (avg_duration + 0.1)))
+            base_score = 0.7 * success_rate + 0.3 * duration_score
+            confidence = min(1.0, count / 6.0)
+            score = 0.5 + confidence * (base_score - 0.5)
+            scored.append((score, -index, tool))
+
+        scored.sort(reverse=True)
+        return [tool for _, _, tool in scored]
+
+    def seed_aggregated_history(self, history: Dict[str, Dict[str, Any]]) -> None:
+        """Preload aggregated performance stats collected outside the strategy."""
+
+        for name, stats in history.items():
+            if not isinstance(stats, dict):
+                continue
+            success = float(stats.get("success", 0))
+            failure = float(stats.get("failure", 0))
+            count = stats.get("count")
+            if count is None:
+                count = success + failure
+            if count <= 0:
+                continue
+            avg_duration = float(stats.get("avg_duration", stats.get("total_duration", 0.0) / count if count else 0.0))
+            success_rate = success / count if count else 0.5
+            self.aggregated_history[name] = {
+                "success_rate": success_rate,
+                "avg_duration": avg_duration,
+                "count": float(count),
+            }
     
     def get_safe_ast_query(self, language: str, intent: str) -> str:
         """Get a safe, validated AST query for the language and intent."""
@@ -379,12 +450,25 @@ class ToolSelectionStrategy:
         """Track tool performance for adaptive learning."""
         if tool not in self.tool_performance:
             self.tool_performance[tool] = []
-            
+
         self.tool_performance[tool].append((success, duration))
-        
+
         # Keep only recent history for adaptive behavior
         if len(self.tool_performance[tool]) > 100:
             self.tool_performance[tool] = self.tool_performance[tool][-50:]
+
+        aggregated = self.aggregated_history.setdefault(
+            tool,
+            {"success_rate": 0.5, "avg_duration": duration, "count": 0.0},
+        )
+        prior_count = aggregated.get("count", 0.0)
+        new_count = prior_count + 1.0
+        prior_successes = aggregated.get("success_rate", 0.5) * prior_count
+        aggregated["success_rate"] = (prior_successes + (1.0 if success else 0.0)) / new_count
+        aggregated["avg_duration"] = (
+            (aggregated.get("avg_duration", duration) * prior_count) + duration
+        ) / new_count
+        aggregated["count"] = new_count
     
     def get_tool_success_rate(self, tool: str) -> float:
         """Get success rate for a tool."""

@@ -92,9 +92,10 @@ def assist_harness(tmp_path: Path, monkeypatch) -> AssistHarness:
     router_rules: list[Rule] = []
 
     class StubRouter:
-        def __init__(self, client, settings_obj) -> None:
+        def __init__(self, client, settings_obj, **kwargs) -> None:
             self.client = client
             self.settings = settings_obj
+            self.extra = kwargs
 
         def route(self, prompt: str) -> IntentDecision:
             for predicate, decision in router_rules:
