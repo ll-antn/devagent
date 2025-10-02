@@ -83,12 +83,59 @@ def _format_message_preview(message: Message, *, limit: int = 200) -> str:
     return f"[{message.role}] {preview}{suffix}"
 
 
-def _emit_context_snapshot(messages: Sequence[Message], iteration: int) -> None:
+def _emit_context_snapshot(
+    messages: Sequence[Message],
+    iteration: int,
+    *,
+    context_metadata: Mapping[str, Any] | None = None,
+) -> None:
     if not _DEBUG_CONTEXT_ENABLED:
         return
 
     iteration_label = "initial context" if iteration == 0 else f"iteration {iteration}"
     click.echo(f"\n🔎 [debug] ReAct context snapshot before {iteration_label}:")
+
+    if isinstance(context_metadata, Mapping) and context_metadata:
+        token_estimate = context_metadata.get("token_estimate")
+        if isinstance(token_estimate, (int, float)):
+            click.echo(f"   [context] token estimate ≈ {int(token_estimate)}")
+
+        events = context_metadata.get("events")
+        last_event: Mapping[str, Any] | None = None
+        if isinstance(events, Sequence):
+            for entry in reversed(events):
+                if isinstance(entry, Mapping):
+                    last_event = entry
+                    break
+
+        if last_event:
+            before = last_event.get("token_estimate_before")
+            after = last_event.get("token_estimate_after")
+            summarized = last_event.get("summarized_messages")
+            summary_chars = last_event.get("summary_chars")
+
+            delta_tokens: str | None = None
+            if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+                delta_tokens = f"Δtokens≈{int(before - after):+}"
+
+            parts: List[str] = []
+            if delta_tokens:
+                parts.append(delta_tokens)
+            if isinstance(summarized, int):
+                parts.append(f"summarized={summarized}")
+            if isinstance(summary_chars, int):
+                parts.append(f"summary_chars={summary_chars}")
+
+            if parts:
+                click.echo(f"   [context] last prune: {'; '.join(parts)}")
+
+        last_summary = context_metadata.get("last_summary")
+        if isinstance(last_summary, str) and last_summary.strip():
+            preview = last_summary.strip().replace("\n", " ")
+            if len(preview) > 120:
+                preview = preview[:117] + "…"
+            click.echo(f"   [context] last summary preview: {preview}")
+
     for index, msg in enumerate(messages, start=1):
         click.echo(f"   {index:02d}. {_format_message_preview(msg)}")
 
@@ -493,7 +540,20 @@ def _execute_react_assistant(
             max_history_turns,
         )
 
-    _emit_context_snapshot(session_manager.compose(session_id), 0)
+    def _debug_context_snapshot(iteration_index: int) -> None:
+        if not _DEBUG_CONTEXT_ENABLED:
+            return
+        session_local = session_manager.get_session(session_id)
+        with session_local.lock:
+            snapshot_messages = session_local.compose()
+            context_metadata = session_local.metadata.get("context_service")
+        _emit_context_snapshot(
+            snapshot_messages,
+            iteration_index,
+            context_metadata=context_metadata if isinstance(context_metadata, Mapping) else None,
+        )
+
+    _debug_context_snapshot(0)
 
     iteration = 0
     tool_history: List[str] = []
@@ -550,7 +610,7 @@ def _execute_react_assistant(
             sanitized_to_entry: Dict[str, Dict[str, Any]] = {}
             sanitized_to_canonical: Dict[str, str] = {}
 
-            _emit_context_snapshot(session_manager.compose(session_id), iteration)
+            _debug_context_snapshot(iteration)
 
             for entry in available_tools:
                 fn = entry.get("function", {})

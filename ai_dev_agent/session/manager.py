@@ -8,6 +8,7 @@ from uuid import uuid4
 from ai_dev_agent.providers.llm.base import Message
 
 from .models import Session
+from .context_service import ContextPruningConfig, ContextPruningService
 
 
 class SessionManager:
@@ -18,6 +19,13 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: Dict[str, Session] = {}
         self._lock = RLock()
+        self._context_service = ContextPruningService()
+
+    def configure_context_service(self, config: ContextPruningConfig | None = None) -> None:
+        """Replace the active context pruning configuration."""
+
+        with self._lock:
+            self._context_service = ContextPruningService(config)
 
     @classmethod
     def get_instance(cls) -> "SessionManager":
@@ -71,6 +79,7 @@ class SessionManager:
         session = self.get_session(session_id)
         with session.lock:
             session.history.extend(messages)
+            self._context_service.update_session(session)
 
     def add_user_message(self, session_id: str, content: str) -> Message:
         message = Message(role="user", content=content)
@@ -107,6 +116,7 @@ class SessionManager:
                 session.system_messages.append(message)
             else:
                 session.history.append(message)
+                self._context_service.update_session(session)
         return message
 
     def remove_system_messages(self, session_id: str, predicate: Callable[[Message], bool]) -> None:
@@ -119,3 +129,4 @@ class SessionManager:
         session = self.get_session(session_id)
         with session.lock:
             session.history.append(message)
+            self._context_service.update_session(session)
