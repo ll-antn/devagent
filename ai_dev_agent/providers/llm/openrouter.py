@@ -46,6 +46,10 @@ class OpenRouterClient(HTTPChatLLMClient):
 
     def _build_headers(self, extra_headers: Dict[str, str] | None = None) -> Dict[str, str]:
         headers = super()._build_headers()
+        headers.update({
+            "HTTP-Referer": "https://github.com/egavrin/devagent",
+            "X-Title": "devagent",
+        })
         if self._default_headers:
             headers.update(self._default_headers)
         if extra_headers:
