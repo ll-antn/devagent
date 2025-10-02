@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Mapping, Sequence
+from typing import Iterable, List, Mapping, Sequence, Set
 
 from ai_dev_agent.providers.llm.base import Message
 from ai_dev_agent.core.utils.context_budget import (
@@ -15,6 +15,7 @@ from ai_dev_agent.core.utils.context_budget import (
 
 
 SUMMARY_PREFIX = "[Context summary]"
+RESUME_HINT = "Use the summary above to continue the conversation from where we left off."
 
 
 @dataclass
@@ -87,6 +88,8 @@ class ContextPruningService:
             refreshed_messages = session.compose()
             final_messages = ensure_context_budget(refreshed_messages, self._budget)
             sanitized = self._sanitize_tool_sequences(final_messages)
+            sanitized, redacted_count = self._redact_stale_tool_outputs(sanitized)
+            metadata["redacted_tool_messages"] = redacted_count
             session.history = [msg for msg in sanitized if msg.role != "system"]
 
             final_estimate = estimate_tokens(session.compose())
@@ -140,7 +143,9 @@ class ContextPruningService:
             content=f"{SUMMARY_PREFIX} (last {len(messages_to_summarize)} messages)\n{summary_body}",
         )
 
-        return [summary_message, *recent_messages]
+        resume_message = Message(role="user", content=RESUME_HINT)
+
+        return [summary_message, resume_message, *recent_messages]
 
     def _adjust_split_index(self, history_list: Sequence[Message], split_index: int) -> int:
         """Shift the recent window to avoid leaving tool responses orphaned."""
@@ -197,6 +202,45 @@ class ContextPruningService:
             last_assistant_with_tools = None
 
         return result
+
+    def _redact_stale_tool_outputs(self, messages: Sequence[Message]) -> tuple[List[Message], int]:
+        """Summarise or redact tool outputs that fall outside the active window."""
+
+        if not messages:
+            return [], 0
+
+        tool_indices = [idx for idx, msg in enumerate(messages) if msg.role == "tool"]
+        if not tool_indices:
+            return list(messages), 0
+
+        keep_count = max(self._budget.max_tool_messages, 0)
+        keep_indices: Set[int] = set(tool_indices[-keep_count:]) if keep_count else set()
+
+        redacted = 0
+        limit = max(self._config.summary_max_chars // 2, 512)
+        result: List[Message] = []
+
+        for idx, msg in enumerate(messages):
+            if msg.role != "tool" or idx in keep_indices:
+                result.append(msg)
+                continue
+
+            summary = summarize_text((msg.content or "").strip(), limit)
+            placeholder_lines = ["[tool output redacted]"]
+            if summary:
+                placeholder_lines.append(summary)
+            redacted_content = "\n".join(placeholder_lines)
+            result.append(
+                Message(
+                    role="tool",
+                    content=redacted_content,
+                    tool_call_id=msg.tool_call_id,
+                    tool_calls=msg.tool_calls,
+                )
+            )
+            redacted += 1
+
+        return result, redacted
 
     def _record_event(self, events: List[Mapping[str, object]], event: ContextPruningEvent) -> None:
         payload = {

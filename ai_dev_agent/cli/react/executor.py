@@ -23,7 +23,7 @@ from ai_dev_agent.cli.utils import (
     _update_files_discovered,
 )
 from ai_dev_agent.core.utils.artifacts import write_artifact
-from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.core.utils.config import DEFAULT_MAX_ITERATIONS, Settings
 from ai_dev_agent.core.utils.context_budget import DEFAULT_MAX_TOOL_OUTPUT_CHARS, summarize_text
 from ai_dev_agent.core.utils.constants import MIN_TOOL_OUTPUT_CHARS
 from ai_dev_agent.core.utils.devagent_config import load_devagent_yaml
@@ -64,13 +64,13 @@ def _is_truthy(value: str | None) -> bool:
 _DEBUG_CONTEXT_ENABLED = _is_truthy(os.getenv("DEVAGENT_DEBUG_REACT_CONTEXT"))
 
 
-def _format_message_preview(message: Message, *, limit: int = 200) -> str:
+def _format_message_preview(message: Message, *, limit: int | None = None) -> str:
     content = message.content
     if content is None:
         preview = "<no content>"
     else:
         preview = str(content).strip()
-        if len(preview) > limit:
+        if limit is not None and limit > 0 and len(preview) > limit:
             preview = preview[: limit - 1] + "…"
 
     suffix_parts: List[str] = []
@@ -341,20 +341,18 @@ def _execute_react_assistant(
 
     config_global_cap = getattr(devagent_cfg, "react_iteration_global_cap", None) if devagent_cfg else None
 
-    env_cap_value: Optional[int] = None
-    env_cap_raw = os.getenv("DEVAGENT_MAX_ITERATIONS")
-    if env_cap_raw:
-        try:
-            env_cap_value = int(env_cap_raw)
-        except ValueError:
-            env_cap_value = None
-
-    default_global_cap = 120
-    global_max_iterations = default_global_cap
-    if isinstance(config_global_cap, int) and config_global_cap > 0:
+    settings_cap_raw = getattr(settings, "max_iterations", None)
+    global_max_iterations = (
+        settings_cap_raw
+        if isinstance(settings_cap_raw, int) and settings_cap_raw > 0
+        else DEFAULT_MAX_ITERATIONS
+    )
+    if (
+        (not isinstance(settings_cap_raw, int) or settings_cap_raw <= 0)
+        and isinstance(config_global_cap, int)
+        and config_global_cap > 0
+    ):
         global_max_iterations = config_global_cap
-    if isinstance(env_cap_value, int) and env_cap_value > 0:
-        global_max_iterations = env_cap_value
 
     iteration_cap = global_max_iterations
 
@@ -367,6 +365,10 @@ def _execute_react_assistant(
     system_messages = build_system_messages(
         iteration_cap=iteration_cap,
         repository_language=repository_language,
+        provider=getattr(settings, "provider", None),
+        model=getattr(settings, "model", None),
+        workspace_root=repo_root,
+        settings=settings,
     )
     session = session_manager.ensure_session(
         session_id,
@@ -516,11 +518,6 @@ def _execute_react_assistant(
             ctx.obj["_project_structure_summary"] = project_structure
     if project_structure:
         structure_state["project_summary"] = project_structure
-        session_manager.add_system_message(
-            session_id,
-            f"Project structure:\n{project_structure}",
-            location="system",
-        )
 
     def _commit_shell_history() -> None:
         if not history_enabled or not isinstance(ctx.obj, dict):
@@ -553,6 +550,21 @@ def _execute_react_assistant(
             context_metadata=context_metadata if isinstance(context_metadata, Mapping) else None,
         )
 
+    def _update_iteration_budget(remaining_iterations: int) -> None:
+        status_prefix = "Current budget:"
+        session_manager.remove_system_messages(
+            session_id,
+            lambda msg: isinstance(msg.content, str) and msg.content.startswith(status_prefix),
+        )
+        session_manager.add_system_message(
+            session_id,
+            f"{status_prefix} {remaining_iterations}/{iteration_cap} iterations remaining",
+            location="system",
+        )
+
+    if iteration_cap:
+        _update_iteration_budget(iteration_cap)
+
     _debug_context_snapshot(0)
 
     iteration = 0
@@ -564,9 +576,15 @@ def _execute_react_assistant(
     while iteration < iteration_cap:
         iteration += 1
 
+        if iteration_cap:
+            _update_iteration_budget(max(iteration_cap - iteration, 0))
+
         if iteration > 0 and iteration % 5 == 0:
             progress_pct = (iteration / iteration_cap) * 100 if iteration_cap else 0.0
+            remaining = max(iteration_cap - iteration, 0) if iteration_cap else None
             progress_msg = f"\n[Progress: {iteration}/{iteration_cap} iterations ({progress_pct:.0f}%)]"
+            if remaining is not None:
+                progress_msg += f" - {remaining} remaining"
             if progress_pct >= 75:
                 progress_msg += " - Approaching limit, prioritize synthesis"
             session_manager.add_system_message(session_id, progress_msg)

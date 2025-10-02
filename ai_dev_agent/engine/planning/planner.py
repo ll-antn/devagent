@@ -6,6 +6,7 @@ import re
 import time
 from dataclasses import InitVar, dataclass, field
 from typing import List, Optional
+from pathlib import Path
 from uuid import uuid4
 
 from ai_dev_agent.providers.llm import (
@@ -239,6 +240,7 @@ class Planner:
         system_messages = build_system_messages(
             include_react_guidance=False,
             extra_messages=[SYSTEM_PROMPT],
+            workspace_root=Path.cwd(),
         )
         session = self._session_manager.ensure_session(
             session_key,

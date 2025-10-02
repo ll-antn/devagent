@@ -72,6 +72,7 @@ class Settings:
     patch_coverage_target: float = 0.8
     stuck_threshold: int = 3
     steps_budget: int = 25
+    max_iterations: int = 120
     lint_command: Optional[str] = None
     format_command: Optional[str] = None
     typecheck_command: Optional[str] = None
@@ -102,6 +103,9 @@ class Settings:
         """Ensure the directory for the state file exists."""
         if not self.state_file.parent.exists():
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+
+DEFAULT_MAX_ITERATIONS: int = Settings.__dataclass_fields__["max_iterations"].default
 
 
 def _cast_bool(value: Any) -> bool:
@@ -147,6 +151,7 @@ def _load_from_env(prefix: str = "DEVAGENT_") -> Dict[str, Any]:
             "diff_limit_files",
             "stuck_threshold",
             "steps_budget",
+            "max_iterations",
             "sandbox_memory_limit_mb",
             "sandbox_cpu_time_limit",
             "max_context_tokens",
@@ -258,4 +263,4 @@ def load_settings(explicit_path: Optional[Path] = None) -> Settings:
     return settings
 
 
-__all__ = ["Settings", "load_settings"]
+__all__ = ["Settings", "load_settings", "DEFAULT_MAX_ITERATIONS"]

@@ -1,8 +1,15 @@
 """Helpers for constructing consistent system prompts across DevAgent surfaces."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import os
+import platform
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
+from ai_dev_agent.core.utils.config import DEFAULT_MAX_ITERATIONS, Settings
+from ai_dev_agent.core.utils.context_budget import summarize_text
 from ai_dev_agent.providers.llm.base import Message
 
 _LANGUAGE_HINTS: Dict[str, str] = {
@@ -23,6 +30,25 @@ _LANGUAGE_HINTS: Dict[str, str] = {
     "dart": "\n- Check pubspec.yaml for dependencies\n- Consider Flutter structure if applicable\n- Use dart analyze for code issues",
 }
 
+_PROVIDER_PREAMBLES: Dict[str, str] = {
+    "anthropic": "Anthropic models favour concise tool arguments and defer to user confirmations when tooling is denied.",
+    "deepseek": "DeepSeek models can emit multi-step tool calls; keep responses grounded in repository evidence and summarise final answers clearly.",
+    "openai": "OpenAI GPT models support JSON function calls; prefer structured outputs when sharing lists or diagnostics.",
+    "google": "Gemini models may rate-limit long outputs; batch tool calls and stream concise updates when possible.",
+}
+
+_DEFAULT_INSTRUCTION_GLOBS: Sequence[str] = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
+    ".devagent/instructions/*.md",
+)
+
+_GLOBAL_INSTRUCTION_CANDIDATES: Sequence[Path] = (
+    Path.home() / ".devagent" / "AGENTS.md",
+    Path.home() / ".config" / "devagent" / "instructions.md",
+)
+
 
 def build_system_messages(
     *,
@@ -30,103 +56,285 @@ def build_system_messages(
     repository_language: Optional[str] = None,
     include_react_guidance: bool = True,
     extra_messages: Optional[List[str]] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    workspace_root: Optional[Path] = None,
+    settings: Optional[Settings] = None,
+    instruction_paths: Optional[Sequence[str]] = None,
 ) -> List[Message]:
     """Produce baseline system messages reused across DevAgent entry points."""
 
-    messages: List[Message] = []
+    root = _resolve_workspace_root(workspace_root, settings)
+
+    guidance_sections: List[str] = []
+    context_sections: List[str] = []
+
+    provider_preamble = _provider_preamble(provider or (getattr(settings, "provider", None) or ""), model or getattr(settings, "model", None))
+    if provider_preamble:
+        guidance_sections.append(provider_preamble)
 
     if include_react_guidance:
-        cap = iteration_cap or 120
-        core = (
-            "You are a helpful assistant for the devagent CLI tool, specialized in efficient software development tasks.\n\n"
-            "## MISSION\n"
-            "Complete the user's task efficiently using available tools within {iteration_cap} iterations.\n\n"
-            "## CORE PRINCIPLES\n"
-            "1. EFFICIENCY: Choose the most appropriate tool for each task\n"
-            "2. AVOID REDUNDANCY: Never repeat identical tool calls\n"
-            "3. BULK OPERATIONS: Prefer batch operations over individual file reads\n"
-            "4. EARLY TERMINATION: Stop when you have sufficient information\n"
-            "5. ADAPTIVE STRATEGY: Change approach if tools fail\n"
-            "6. SCRIPT GENERATION: Create scripts for complex computations\n\n"
-            "## ITERATION MANAGEMENT\n"
-            "- Current budget: {iteration_cap} iterations\n"
-            "- At 75% usage ({iteration_cap_75} iterations): Begin consolidating findings\n"
-            "- At 90% usage ({iteration_cap_90} iterations): Finalize answer\n"
-        ).format(
-            iteration_cap=cap,
-            iteration_cap_75=int(cap * 0.75),
-            iteration_cap_90=int(cap * 0.9),
+        guidance_sections.append(
+            _react_guidance(iteration_cap, repository_language, settings=settings)
         )
 
-        if repository_language:
-            hint = _LANGUAGE_HINTS.get(repository_language.lower())
-            if hint:
-                core += f"\nLANGUAGE-SPECIFIC ({repository_language}):{hint}\n"
+    environment_snapshot = _environment_snapshot(root)
+    if environment_snapshot:
+        context_sections.append(environment_snapshot)
 
-        tool_semantics = (
-            "\nTOOL SEMANTICS:\n"
-            "- exec: Runs commands in POSIX shell; pipes, globs, redirects work\n"
-            "- Prefer machine-parsable output (e.g., find -print0) over formatted listings\n"
-            "- Minimize tool calls - stop once you have the answer\n"
-        )
-
-        output_discipline = (
-            "\nOUTPUT REQUIREMENTS:\n"
-            "- State scope explicitly (depth, hidden files, symlinks)\n"
-            "- Ensure counts match actual listed items\n"
-            "- Stop executing once you have sufficient information\n"
-        )
-
-        fs_recipes = (
-            "\nCOMMON OPERATIONS:\n"
-            "Count files: `find . -maxdepth 1 -type f | wc -l`\n"
-            "List safely: `find . -maxdepth 1 -type f -print0 | xargs -0 -n1 basename`\n"
-            "Verify location: `pwd` and `ls -la`\n"
-        )
-
-        failure_handling = (
-            "\nFAILURE HANDLING:\n"
-            "- First failure: Adjust parameters\n"
-            "- Second failure: Switch tools/approach\n"
-            "- System blocks identical calls after 2 failures\n"
-            "- 3+ consecutive failures trigger termination\n"
-        )
-
-        tool_guidance = (
-            "\nUNIVERSAL TOOL STRATEGIES:\n"
-            "- For counting/metrics: Use shell commands with find/grep/wc\n"
-            "- For pattern search: Start with code_search, then read specific files\n"
-            "- For exploration: Use ast_query for structure, symbols for definitions\n"
-            "- For bulk operations: Generate and execute scripts\n"
-            "- For file operations: Prefer find/xargs over individual reads\n"
-            "- Verify unexpected results (especially counts <=1) with pwd and ls -la\n"
-        )
-
-        tool_priority = (
-            "\nTOOL SELECTION GUIDE:\n"
-            "- Counting/metrics -> exec with scripts\n"
-            "- Pattern search -> code_search\n"
-            "- Code structure -> ast_query\n"
-            "- Specific files -> fs.read\n"
-            "- Bulk operations -> exec with find/xargs\n"
-            "- Complex analysis -> Generate analysis scripts\n"
-        )
-
-        instructions = (
-            core
-            + tool_semantics
-            + output_discipline
-            + fs_recipes
-            + failure_handling
-            + tool_guidance
-            + tool_priority
-        )
-
-        messages.append(Message(role="system", content=instructions))
+    instruction_blocks = _instruction_overlays(root, instruction_paths, settings)
+    if instruction_blocks:
+        context_sections.append("Additional instructions:\n" + "\n\n".join(instruction_blocks))
 
     if extra_messages:
-        for entry in extra_messages:
-            if entry:
-                messages.append(Message(role="system", content=entry))
+        context_sections.append("\n".join(entry.strip() for entry in extra_messages if entry).strip())
+
+    primary_text = "\n\n".join(section.strip() for section in guidance_sections if section).strip()
+
+    messages: List[Message] = []
+    if primary_text:
+        messages.append(Message(role="system", content=primary_text))
+
+    for section in context_sections:
+        text = section.strip()
+        if text:
+            messages.append(Message(role="system", content=text))
+
+    if not messages:
+        fallback = "You are a helpful assistant for the devagent CLI tool. Prioritise accurate reasoning and safe tool usage."
+        messages.append(Message(role="system", content=fallback))
 
     return messages
+
+
+def _resolve_workspace_root(workspace_root: Optional[Path], settings: Optional[Settings]) -> Path:
+    candidate = workspace_root or getattr(settings, "workspace_root", None) or Path.cwd()
+    try:
+        return candidate.resolve()
+    except OSError:
+        return Path.cwd()
+
+
+def _provider_preamble(provider: str, model: Optional[str]) -> str:
+    key = provider.lower().strip()
+    if not key:
+        return ""
+    base = _PROVIDER_PREAMBLES.get(key)
+    if not base:
+        return f"You are running on the {provider} provider{f' using {model}' if model else ''}. Optimise tool usage and produce grounded answers."
+    if model:
+        return f"Model: {model} ({provider}). {base}"
+    return f"Provider: {provider}. {base}"
+
+
+def _react_guidance(
+    iteration_cap: Optional[int],
+    repository_language: Optional[str],
+    *,
+    settings: Optional[Settings] = None,
+) -> str:
+    fallback_cap = getattr(settings, "max_iterations", None) if settings else None
+    if not isinstance(fallback_cap, int) or fallback_cap <= 0:
+        fallback_cap = DEFAULT_MAX_ITERATIONS
+    cap = iteration_cap if isinstance(iteration_cap, int) and iteration_cap > 0 else fallback_cap
+    core = (
+        "You are a helpful assistant for the devagent CLI tool, specialised in efficient software development tasks.\n\n"
+        "## MISSION\n"
+        "Complete the user's task efficiently using available tools within {iteration_cap} iterations.\n\n"
+        "## CORE PRINCIPLES\n"
+        "1. EFFICIENCY: Choose the most appropriate tool for each task\n"
+        "2. AVOID REDUNDANCY: Never repeat identical tool calls\n"
+        "3. BULK OPERATIONS: Prefer batch operations over individual file reads\n"
+        "4. EARLY TERMINATION: Stop when you have sufficient information\n"
+        "5. ADAPTIVE STRATEGY: Change approach if tools fail\n"
+        "6. SCRIPT GENERATION: Create scripts for complex computations\n\n"
+        "## ITERATION MANAGEMENT\n"
+        "- Starting budget: {iteration_cap} iterations\n"
+        "- At 75% usage ({iteration_cap_75} iterations): Begin consolidating findings\n"
+        "- At 90% usage ({iteration_cap_90} iterations): Finalise answer\n"
+    ).format(
+        iteration_cap=cap,
+        iteration_cap_75=int(cap * 0.75),
+        iteration_cap_90=int(cap * 0.9),
+    )
+
+    if repository_language:
+        hint = _LANGUAGE_HINTS.get(str(repository_language).lower())
+        if hint:
+            core += f"\nLANGUAGE-SPECIFIC ({repository_language}):{hint}\n"
+
+    tool_semantics = (
+        "\nTOOL SEMANTICS:\n"
+        "- exec: Runs commands in POSIX shell; pipes, globs, redirects work\n"
+        "- Prefer machine-parsable output (e.g. find -print0) over formatted listings\n"
+        "- Minimise tool calls – stop once you have the answer\n"
+    )
+
+    output_discipline = (
+        "\nOUTPUT REQUIREMENTS:\n"
+        "- State scope explicitly (depth, hidden files, symlinks)\n"
+        "- Ensure counts match actual listed items\n"
+        "- Stop executing once you have sufficient information\n"
+    )
+
+    fs_recipes = (
+        "\nCOMMON OPERATIONS:\n"
+        "Count files: `find . -maxdepth 1 -type f | wc -l`\n"
+        "List safely: `find . -maxdepth 1 -type f -print0 | xargs -0 -n1 basename`\n"
+        "Verify location: `pwd` and `ls -la`\n"
+    )
+
+    failure_handling = (
+        "\nFAILURE HANDLING:\n"
+        "- First failure: Adjust parameters\n"
+        "- Second failure: Switch tools/approach\n"
+        "- System blocks identical calls after two failures\n"
+        "- Three or more consecutive failures should trigger termination\n"
+    )
+
+    tool_guidance = (
+        "\nUNIVERSAL TOOL STRATEGIES:\n"
+        "- For counting/metrics: Use shell commands with find/grep/wc\n"
+        "- For pattern search: Start with code_search, then read specific files\n"
+        "- For exploration: Use ast_query for structure, symbols for definitions\n"
+        "- For bulk operations: Generate and execute scripts\n"
+        "- For file operations: Prefer find/xargs over individual reads\n"
+        "- Verify unexpected results (especially counts <=1) with pwd and ls -la\n"
+    )
+
+    tool_priority = (
+        "\nTOOL SELECTION GUIDE:\n"
+        "- Counting/metrics -> exec with scripts\n"
+        "- Pattern search -> code_search\n"
+        "- Code structure -> ast_query\n"
+        "- Specific files -> fs.read\n"
+        "- Bulk operations -> exec with find/xargs\n"
+        "- Complex analysis -> Generate analysis scripts\n"
+    )
+
+    return core + tool_semantics + output_discipline + fs_recipes + failure_handling + tool_guidance + tool_priority
+
+
+def _environment_snapshot(root: Path) -> str:
+    lines = ["Environment snapshot:"]
+    lines.append(f"  Workspace: {root}")
+    lines.append(f"  Python: {platform.python_version()}")
+    lines.append(f"  Platform: {platform.platform()}")
+    lines.append(f"  Timestamp: {datetime.utcnow().isoformat()}Z")
+
+    git_lines = _git_context(root)
+    lines.extend(f"  {entry}" for entry in git_lines)
+
+    return "\n".join(lines)
+
+
+def _git_context(root: Path) -> List[str]:
+    args = ["git", "rev-parse", "--is-inside-work-tree"]
+    try:
+        probe = subprocess.run(args, cwd=root, capture_output=True, text=True, check=False)
+    except (OSError, ValueError):
+        return ["Git: unavailable"]
+
+    if probe.returncode != 0 or probe.stdout.strip().lower() != "true":
+        return ["Git: not a repository"]
+
+    context: List[str] = []
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    if branch:
+        context.append(f"Git branch: {branch}")
+
+    head = _run_git(["rev-parse", "--short", "HEAD"], root)
+    if head:
+        context.append(f"Git commit: {head}")
+
+    status_raw = _run_git(["status", "--short"], root)
+    if status_raw is not None:
+        changes = [line for line in status_raw.splitlines() if line.strip()]
+        if changes:
+            sample = ", ".join(changes[:4])
+            if len(changes) > 4:
+                sample += ", …"
+            context.append(f"Git status: {len(changes)} change(s) ({sample})")
+        else:
+            context.append("Git status: clean")
+    return context
+
+
+def _run_git(arguments: Sequence[str], root: Path) -> Optional[str]:
+    try:
+        result = subprocess.run(["git", *arguments], cwd=root, capture_output=True, text=True, check=False)
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _instruction_overlays(
+    root: Path,
+    instruction_paths: Optional[Sequence[str]],
+    settings: Optional[Settings],
+    *,
+    max_chars: int = 4_000,
+) -> List[str]:
+    candidates: List[str] = []
+    seen: Set[Path] = set()
+
+    for pattern in _DEFAULT_INSTRUCTION_GLOBS:
+        candidates.extend(_expand_instruction_glob(root, pattern))
+
+    for global_candidate in _GLOBAL_INSTRUCTION_CANDIDATES:
+        if global_candidate.is_file():
+            candidates.append(str(global_candidate))
+
+    if settings:
+        provider_cfg = getattr(settings, "provider_config", {})
+        if isinstance(provider_cfg, dict):
+            extra = provider_cfg.get("prompt_instructions")
+            if isinstance(extra, str):
+                candidates.extend([extra])
+            elif isinstance(extra, Iterable):
+                for item in extra:
+                    if isinstance(item, str):
+                        candidates.append(item)
+
+    env_instructions = os.getenv("DEVAGENT_PROMPT_INSTRUCTIONS")
+    if env_instructions:
+        for token in env_instructions.split(os.pathsep):
+            token = token.strip()
+            if token:
+                candidates.append(token)
+
+    if instruction_paths:
+        candidates.extend(list(instruction_paths))
+
+    blocks: List[str] = []
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = (root / path).resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        try:
+            text = resolved.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        text = summarize_text(text.strip(), max_chars)
+        if text:
+            blocks.append(f"[{resolved.name}]\n{text}")
+    return blocks
+
+
+def _expand_instruction_glob(root: Path, pattern: str) -> List[str]:
+    if "*" not in pattern:
+        return [pattern]
+    try:
+        matches = list(root.glob(pattern))
+    except OSError:
+        return []
+    return [str(match) for match in matches if match.is_file()]

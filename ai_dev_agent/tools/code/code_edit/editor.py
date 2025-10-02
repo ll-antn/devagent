@@ -143,6 +143,7 @@ class CodeEditor:
         self._base_system_messages = build_system_messages(
             include_react_guidance=False,
             extra_messages=[SYSTEM_PROMPT],
+            workspace_root=self.repo_root,
         )
         self._session_manager.ensure_session(
             self._session_id,

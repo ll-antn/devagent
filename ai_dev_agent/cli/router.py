@@ -127,6 +127,10 @@ class IntentRouter:
         system_messages = build_system_messages(
             include_react_guidance=False,
             extra_messages=[self._system_prompt()],
+            provider=getattr(self.settings, "provider", None),
+            model=getattr(self.settings, "model", None),
+            workspace_root=getattr(self.settings, "workspace_root", None),
+            settings=self.settings,
         )
         session = self._session_manager.ensure_session(
             self._session_id,

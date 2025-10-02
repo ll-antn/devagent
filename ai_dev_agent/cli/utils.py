@@ -20,6 +20,7 @@ from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.context_budget import BudgetedLLMClient, config_from_settings
 from ai_dev_agent.core.utils.constants import DEFAULT_IGNORED_REPO_DIRS, MAX_HISTORY_ENTRIES
 from ai_dev_agent.core.utils.devagent_config import load_devagent_yaml
+from ai_dev_agent.core.utils.repo_outline import generate_repo_outline
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.logger import get_logger, set_correlation_id
 from ai_dev_agent.core.utils.state import InMemoryStateStore, StateStore
@@ -30,10 +31,7 @@ from ai_dev_agent.providers.llm import (
     create_client,
 )
 from ai_dev_agent.tools import ToolContext, registry as tool_registry
-from ai_dev_agent.tools.code.code_edit.tree_sitter_analysis import (
-    TreeSitterProjectAnalyzer,
-    extract_symbols_from_outline,
-)
+from ai_dev_agent.tools.code.code_edit.tree_sitter_analysis import extract_symbols_from_outline
 from ai_dev_agent.tools.execution.sandbox import SandboxConfig, SandboxExecutor
 
 LOGGER = get_logger(__name__)
@@ -178,90 +176,15 @@ def _resolve_repo_path(path_value: str | None) -> Path:
 def _collect_project_structure_outline(
     repo_root: Path,
     *,
-    max_files: int = 6,
-    max_file_bytes: int = 120_000,
+    max_entries: int = 160,
+    max_depth: int = 3,
 ) -> Optional[str]:
-    """Return a lightweight project structure summary using tree-sitter when available."""
+    """Return a concise repository outline for prompt context."""
 
-    try:
-        analyzer = TreeSitterProjectAnalyzer(repo_root, max_files=max_files)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        LOGGER.debug("Failed to initialize TreeSitterProjectAnalyzer: %s", exc)
+    outline = generate_repo_outline(repo_root, max_entries=max_entries, max_depth=max_depth)
+    if not outline:
         return None
-
-    if not analyzer.available:
-        return None
-
-    skip_dirs = DEFAULT_IGNORED_REPO_DIRS
-
-    file_entries: List[Tuple[str, str]] = []
-    seen_paths: Set[str] = set()
-
-    for suffix in analyzer.SUPPORTED_SUFFIXES:
-        if len(file_entries) >= max_files:
-            break
-        try:
-            candidates = sorted(repo_root.rglob(f"*{suffix}"))
-        except OSError:  # pragma: no cover - defensive guard
-            continue
-        for path in candidates:
-            if len(file_entries) >= max_files:
-                break
-            if not path.is_file():
-                continue
-            if any(part in skip_dirs for part in path.parts):
-                continue
-            try:
-                if path.stat().st_size > max_file_bytes:
-                    continue
-            except OSError:
-                continue
-            try:
-                content = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            try:
-                rel_path = str(path.relative_to(repo_root))
-            except ValueError:
-                continue
-            if rel_path in seen_paths:
-                continue
-            seen_paths.add(rel_path)
-            file_entries.append((rel_path, content))
-
-    if not file_entries:
-        return None
-
-    try:
-        summary_text = analyzer.build_project_summary(file_entries)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        LOGGER.debug("Failed to build project structure summary: %s", exc)
-        return None
-
-    if not summary_text:
-        return None
-
-    return _prepare_structure_prompt(summary_text)
-
-
-def _prepare_structure_prompt(summary_text: str, *, max_lines: int = 80, max_chars: int = 4000) -> str:
-    """Compress a markdown structure outline for planner prompts."""
-
-    lines = []
-    for raw_line in summary_text.splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            continue
-        lines.append(stripped)
-        if len(lines) >= max_lines:
-            break
-
-    compact = "\n".join(lines).strip()
-    if len(compact) > max_chars:
-        compact = compact[: max_chars - 3].rstrip() + "..."
-    return compact
+    return outline
 
 
 def _get_structure_hints_state(ctx: click.Context) -> Dict[str, Any]:
@@ -658,7 +581,6 @@ __all__ = [
     "build_system_context",
     "_resolve_repo_path",
     "_collect_project_structure_outline",
-    "_prepare_structure_prompt",
     "_get_structure_hints_state",
     "_export_structure_hints_state",
     "_merge_structure_hints_state",
