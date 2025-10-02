@@ -10,6 +10,7 @@ import click
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.logger import configure_logging, get_logger
 from ai_dev_agent.tools.execution.shell_session import ShellSessionError, ShellSessionManager
+from ai_dev_agent.session import SessionManager
 
 from .react.executor import _execute_react_assistant
 from .utils import _build_context, get_llm_client, _record_invocation
@@ -198,6 +199,74 @@ def shell(ctx: click.Context) -> None:
             ctx.obj.pop("_shell_conversation_history", None)
 
         manager.close_all()
+
+
+@cli.command(name="diagnostics")
+@click.option("--session", "session_id", help="Inspect a specific session ID (defaults to CLI session).")
+@click.option("--plan", is_flag=True, help="Show planner sessions as well." )
+@click.option("--router", is_flag=True, help="Include intent router history.")
+@click.pass_context
+def diagnostics(
+    ctx: click.Context,
+    session_id: Optional[str],
+    plan: bool,
+    router: bool,
+) -> None:
+    """Display conversation and metadata recorded by the session service."""
+
+    manager = SessionManager.get_instance()
+
+    target_ids = []
+    if session_id:
+        if not manager.has_session(session_id):
+            raise click.ClickException(f"Session '{session_id}' not found")
+        target_ids.append(session_id)
+    else:
+        cli_session = ctx.obj.get("_session_id")
+        if cli_session and manager.has_session(cli_session):
+            target_ids.append(cli_session)
+        if plan:
+            plan_session = ctx.obj.get("_planner_session_id")
+            if plan_session and manager.has_session(plan_session):
+                target_ids.append(plan_session)
+        if router:
+            router_session = getattr(ctx.obj.get("_router_state", {}), "get", lambda _x: None)("session_id")
+            if router_session and manager.has_session(router_session):
+                target_ids.append(router_session)
+
+    if not target_ids:
+        raise click.ClickException("No sessions available to inspect. Provide --session or run a query first.")
+
+    for idx, sid in enumerate(dict.fromkeys(target_ids), start=1):
+        session = manager.get_session(sid)
+        click.echo(f"\n=== Session {idx}: {sid} ===")
+        with session.lock:
+            if session.metadata:
+                click.echo("Metadata:")
+                for key, value in session.metadata.items():
+                    click.echo(f"  - {key}: {value}")
+            else:
+                click.echo("Metadata: <none>")
+
+            if session.system_messages:
+                click.echo("\nSystem Prompts:")
+                for message in session.system_messages:
+                    click.echo(f"  [{message.role}] {message.content[:200]}" + ("..." if message.content and len(message.content) > 200 else ""))
+
+            if session.history:
+                click.echo("\nHistory:")
+                for message in session.history:
+                    snippet = (message.content or "").strip()
+                    if snippet and len(snippet) > 200:
+                        snippet = snippet[:197] + "..."
+                    if message.role == "tool" and message.tool_call_id:
+                        click.echo(f"  [tool:{message.tool_call_id}] {snippet}")
+                    elif message.role == "assistant" and message.tool_calls:
+                        click.echo(f"  [assistant tool-calls] {snippet}")
+                    else:
+                        click.echo(f"  [{message.role}] {snippet}")
+            else:
+                click.echo("\nHistory: <empty>")
 
 
 def main() -> None:

@@ -10,6 +10,7 @@ import time
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
+from uuid import uuid4
 
 import click
 
@@ -44,6 +45,7 @@ from ai_dev_agent.providers.llm import (
     LLMTimeoutError,
 )
 from ai_dev_agent.providers.llm.base import Message
+from ai_dev_agent.session import SessionManager, build_system_messages
 
 from ..analysis.formatting import _format_enhanced_tool_log
 from ..analysis.research import _handle_question_without_llm
@@ -248,6 +250,7 @@ def _execute_react_assistant(
         project_profile=project_profile,
         tool_success_history=ctx_obj.get("_tool_success_history"),
     )
+    ctx_obj.setdefault("_router_state", {})["session_id"] = getattr(router, "session_id", None)
     available_tools = getattr(router, "tools", [])
 
     if not supports_tool_calls:
@@ -307,6 +310,33 @@ def _execute_react_assistant(
         global_max_iterations = env_cap_value
 
     iteration_cap = global_max_iterations
+
+    session_manager = SessionManager.get_instance()
+    session_id = ctx_obj.get("_session_id")
+    if not session_id:
+        session_id = f"cli-{uuid4()}"
+        ctx_obj["_session_id"] = session_id
+
+    system_messages = build_system_messages(
+        iteration_cap=iteration_cap,
+        repository_language=repository_language,
+    )
+    session = session_manager.ensure_session(
+        session_id,
+        system_messages=system_messages,
+        metadata={
+            "iteration_cap": iteration_cap,
+            "repository_language": repository_language,
+        },
+    )
+
+    if history_enabled and existing_history and not session.metadata.get("existing_history_loaded"):
+        session_manager.extend_history(session_id, existing_history)
+        session.metadata["existing_history_loaded"] = True
+
+    session_manager.extend_history(session_id, [user_message])
+    with session.lock:
+        session.metadata["history_anchor"] = len(session.history)
 
     planner_enabled = planning_active and getattr(settings, "react_enable_planner", True)
     structured_plan = None
@@ -378,10 +408,12 @@ def _execute_react_assistant(
             )
 
             planner = Planner(client)
+            planner_session_id = ctx_obj.setdefault("_planner_session_id", f"{session_id}-planner")
             structured_plan = planner.generate(
                 user_prompt,
                 project_structure=project_structure,
                 context=planning_context,
+                session_id=planner_session_id,
             )
             if structured_plan.complexity:
                 ctx_obj["_active_plan_complexity"] = structured_plan.complexity
@@ -430,111 +462,6 @@ def _execute_react_assistant(
             targets.append(str(paths_value))
         return targets
 
-    core_instructions = (
-        "You are a helpful assistant for the devagent CLI tool, specialized in efficient software development tasks.\n\n"
-        "## MISSION\n"
-        "Complete the user's task efficiently using available tools within {iteration_cap} iterations.\n\n"
-        "## CORE PRINCIPLES\n"
-        "1. EFFICIENCY: Choose the most appropriate tool for each task\n"
-        "2. AVOID REDUNDANCY: Never repeat identical tool calls\n"
-        "3. BULK OPERATIONS: Prefer batch operations over individual file reads\n"
-        "4. EARLY TERMINATION: Stop when you have sufficient information\n"
-        "5. ADAPTIVE STRATEGY: Change approach if tools fail\n"
-        "6. SCRIPT GENERATION: Create scripts for complex computations\n\n"
-        "## ITERATION MANAGEMENT\n"
-        f"- Current budget: {iteration_cap} iterations\n"
-        f"- At 75% usage ({int(iteration_cap * 0.75)} iterations): Begin consolidating findings\n"
-        f"- At 90% usage ({int(iteration_cap * 0.9)} iterations): Finalize answer\n"
-    )
-
-    language_hints = {
-        "python": "\n- Use ast_query for Python code structure\n- Check requirements.txt/setup.py for dependencies\n- Use import analysis for module relationships",
-        "javascript": "\n- Consider package.json for dependencies\n- Use ast_query for JS/TS structure\n- Check for .eslintrc for code standards",
-        "typescript": "\n- Check tsconfig.json for compilation settings\n- Use ast_query for TypeScript analysis\n- Consider type definitions in .d.ts files",
-        "java": "\n- Check pom.xml or build.gradle for dependencies\n- Use ast_query for class hierarchies\n- Consider package structure for organization",
-        "c++": "\n- Check CMakeLists.txt or Makefile for build config\n- Look for .h/.hpp headers separately from .cpp/.cc files\n- Use compile_commands.json if available",
-        "c": "\n- Check Makefile or CMakeLists.txt for build setup\n- Analyze header files (.h) for interfaces\n- Use grep for macro definitions",
-        "go": "\n- Check go.mod for module dependencies\n- Use go tools for analysis\n- Consider internal vs external packages",
-        "rust": "\n- Check Cargo.toml for dependencies\n- Use cargo commands for analysis\n- Consider module structure in lib.rs/main.rs",
-        "ruby": "\n- Check Gemfile for dependencies\n- Look for rake tasks\n- Consider Rails structure if applicable",
-        "php": "\n- Check composer.json for dependencies\n- Look for autoload configurations\n- Consider framework structure (Laravel, Symfony)",
-        "c#": "\n- Check .csproj or .sln files\n- Use NuGet packages info\n- Consider namespace organization",
-        "swift": "\n- Check Package.swift for dependencies\n- Look for .xcodeproj/xcworkspace\n- Consider iOS/macOS target differences",
-        "kotlin": "\n- Check build.gradle.kts for configuration\n- Consider Android vs JVM targets\n- Use Gradle for dependency info",
-        "scala": "\n- Check build.sbt for dependencies\n- Use sbt commands for analysis\n- Consider Play/Akka frameworks if present",
-        "dart": "\n- Check pubspec.yaml for dependencies\n- Consider Flutter structure if applicable\n- Use dart analyze for code issues",
-    }
-
-    if repository_language:
-        language_guidance = language_hints.get(repository_language.lower(), "")
-        if language_guidance:
-            core_instructions += f"\nLANGUAGE-SPECIFIC ({repository_language}):{language_guidance}\n"
-
-    tool_semantics = (
-        "\nTOOL SEMANTICS:\n"
-        "- exec: Runs commands in POSIX shell; pipes, globs, redirects work\n"
-        "- Prefer machine-parsable output (e.g., find -print0) over formatted listings\n"
-        "- Minimize tool calls - stop once you have the answer\n"
-    )
-
-    output_discipline = (
-        "\nOUTPUT REQUIREMENTS:\n"
-        "- State scope explicitly (depth, hidden files, symlinks)\n"
-        "- Ensure counts match actual listed items\n"
-        "- Stop executing once you have sufficient information\n"
-    )
-
-    fs_quick_recipes = (
-        "\nCOMMON OPERATIONS:\n"
-        "Count files: `find . -maxdepth 1 -type f | wc -l`\n"
-        "List safely: `find . -maxdepth 1 -type f -print0 | xargs -0 -n1 basename`\n"
-        "Verify location: `pwd` and `ls -la`\n"
-    )
-
-    failure_policy = (
-        "\nFAILURE HANDLING:\n"
-        "- First failure: Adjust parameters\n"
-        "- Second failure: Switch tools/approach\n"
-        "- System blocks identical calls after 2 failures\n"
-        "- 3+ consecutive failures trigger termination\n"
-    )
-
-    tool_guidance = (
-        "\nUNIVERSAL TOOL STRATEGIES:\n"
-        "- For counting/metrics: Use shell commands with find/grep/wc\n"
-        "- For pattern search: Start with code_search, then read specific files\n"
-        "- For exploration: Use ast_query for structure, symbols for definitions\n"
-        "- For bulk operations: Generate and execute scripts\n"
-        "- For file operations: Prefer find/xargs over individual reads\n"
-        "- Verify unexpected results (especially counts <=1) with pwd and ls -la\n"
-    )
-
-    tool_priority_guidance = (
-        "\nTOOL SELECTION GUIDE:\n"
-        "- Counting/metrics -> exec with scripts\n"
-        "- Pattern search -> code_search\n"
-        "- Code structure -> ast_query\n"
-        "- Specific files -> fs.read\n"
-        "- Bulk operations -> exec with find/xargs\n"
-        "- Complex analysis -> Generate analysis scripts\n"
-    )
-
-    messages = [
-        Message(
-            role="system",
-            content=(
-                core_instructions
-                + tool_semantics
-                + output_discipline
-                + fs_quick_recipes
-                + failure_policy
-                + tool_guidance
-                + tool_priority_guidance
-            ),
-        ),
-        user_message,
-    ]
-
     project_structure = ctx.obj.get("_project_structure_summary")
     if not project_structure:
         project_structure = _collect_project_structure_outline(repo_root)
@@ -542,35 +469,31 @@ def _execute_react_assistant(
             ctx.obj["_project_structure_summary"] = project_structure
     if project_structure:
         structure_state["project_summary"] = project_structure
-        messages.insert(
-            1,
-            Message(
-                role="system",
-                content=f"Project structure:\n{project_structure}",
-            ),
+        session_manager.add_system_message(
+            session_id,
+            f"Project structure:\n{project_structure}",
+            location="system",
         )
-
-    if history_enabled and existing_history:
-        insert_at = len(messages) - 1
-        messages[insert_at:insert_at] = existing_history
-
-    history_start_index = len(messages) - 1
 
     def _commit_shell_history() -> None:
         if not history_enabled or not isinstance(ctx.obj, dict):
             return
+        session_local = session_manager.get_session(session_id)
+        anchor = session_local.metadata.get("history_anchor", len(session_local.history))
         new_entries: List[Message] = []
         if user_message.content:
             new_entries.append(user_message)
-        for msg in messages[history_start_index + 1 :]:
-            if msg.role == "assistant" and msg.content and not msg.tool_calls:
-                new_entries.append(msg)
+        with session_local.lock:
+            for msg in session_local.history[anchor:]:
+                if msg.role == "assistant" and msg.content and not msg.tool_calls:
+                    new_entries.append(msg)
+            session_local.metadata["history_anchor"] = len(session_local.history)
         ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
             existing_history + new_entries,
             max_history_turns,
         )
 
-    _emit_context_snapshot(messages, 0)
+    _emit_context_snapshot(session_manager.compose(session_id), 0)
 
     iteration = 0
     tool_history: List[str] = []
@@ -586,7 +509,7 @@ def _execute_react_assistant(
             progress_msg = f"\n[Progress: {iteration}/{iteration_cap} iterations ({progress_pct:.0f}%)]"
             if progress_pct >= 75:
                 progress_msg += " - Approaching limit, prioritize synthesis"
-            messages.append(Message(role="system", content=progress_msg))
+            session_manager.add_system_message(session_id, progress_msg)
 
         if iteration > 5 and isinstance(tool_success_tracker, dict) and tool_success_tracker:
             perf_summary: List[str] = []
@@ -600,21 +523,15 @@ def _execute_react_assistant(
                     success_rate = stats.get("success", 0) / count if count else 0.0
                     perf_summary.append(f"  {tool_name}: {success_rate:.0%} success rate")
             if perf_summary:
-                messages = [
-                    msg
-                    for msg in messages
-                    if not (
-                        msg.role == "system"
-                        and isinstance(msg.content, str)
-                        and msg.content.startswith("Tool performance this session:")
-                    )
-                ]
-                messages.insert(
-                    1,
-                    Message(
-                        role="system",
-                        content="Tool performance this session:\n" + "\n".join(perf_summary),
-                    ),
+                session_manager.remove_system_messages(
+                    session_id,
+                    lambda msg: isinstance(msg.content, str)
+                    and msg.content.startswith("Tool performance this session:")
+                )
+                session_manager.add_system_message(
+                    session_id,
+                    "Tool performance this session:\n" + "\n".join(perf_summary),
+                    location="system",
                 )
 
         strategy_context = StrategyToolContext(
@@ -633,7 +550,7 @@ def _execute_react_assistant(
             sanitized_to_entry: Dict[str, Dict[str, Any]] = {}
             sanitized_to_canonical: Dict[str, str] = {}
 
-            _emit_context_snapshot(messages, iteration)
+            _emit_context_snapshot(session_manager.compose(session_id), iteration)
 
             for entry in available_tools:
                 fn = entry.get("function", {})
@@ -669,7 +586,8 @@ def _execute_react_assistant(
             tools_for_iteration = available_tools
 
         try:
-            result = client.invoke_tools(messages, tools=tools_for_iteration, temperature=0.1)
+            conversation = session_manager.compose(session_id)
+            result = client.invoke_tools(conversation, tools=tools_for_iteration, temperature=0.1)
 
             assistant_message = Message(
                 role="assistant",
@@ -677,7 +595,7 @@ def _execute_react_assistant(
                 tool_calls=result.raw_tool_calls,
             )
             if assistant_message.content is not None or assistant_message.tool_calls:
-                messages.append(assistant_message)
+                session_manager.extend_history(session_id, [assistant_message])
 
             if not result.calls:
                 # If we have tool_calls but no result.calls, we need to add dummy tool responses
@@ -686,12 +604,10 @@ def _execute_react_assistant(
                     for tool_call in assistant_message.tool_calls:
                         tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
                         if tool_call_id:
-                            messages.append(
-                                Message(
-                                    role="tool",
-                                    content="Tool call was not executed.",
-                                    tool_call_id=tool_call_id,
-                                )
+                            session_manager.add_tool_message(
+                                session_id,
+                                tool_call_id,
+                                "Tool call was not executed.",
                             )
 
                 if result.message_content:
@@ -747,12 +663,10 @@ def _execute_react_assistant(
                 if not handler:
                     error_msg = f"Tool '{tool_call.name}' is not supported."
                     tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", "unknown")
-                    messages.append(
-                        Message(
-                            role="tool",
-                            content=f"Error: {error_msg}",
-                            tool_call_id=tool_call_id,
-                        )
+                    session_manager.add_tool_message(
+                        session_id,
+                        tool_call_id,
+                        f"Error: {error_msg}",
                     )
                     click.echo(f"❌ {tool_call.name} → Tool not supported")
                     consecutive_fails += 1
@@ -793,7 +707,7 @@ def _execute_react_assistant(
                                 f"Repeated failure detected for {tool_call.name} with arguments {arg_summary_inner}. "
                                 f"Last error: {error_summary}. Consider adjusting the approach (modify the command, switch tools, or break the task into smaller steps)."
                             )
-                            messages.append(Message(role="system", content=advisory))
+                            session_manager.add_system_message(session_id, advisory)
                             failure_meta["summary_sent"] = True
                     else:
                         failure_meta.pop("blocked", None)
@@ -916,12 +830,11 @@ def _execute_react_assistant(
                     tracker_entry["avg_duration"] = tracker_entry["total_duration"] / tracker_entry["count"]
 
                 tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
-                tool_message = Message(
-                    role="tool",
-                    content=tool_output_for_message or tool_output,
-                    tool_call_id=tool_call_id,
+                session_manager.add_tool_message(
+                    session_id,
+                    tool_call_id,
+                    tool_output_for_message or tool_output,
                 )
-                messages.append(tool_message)
 
                 if handler_result:
                     _merge_structure_hints_state(structure_state, handler_result)
@@ -949,7 +862,7 @@ def _execute_react_assistant(
                             "2. List directory contents: `ls -la`\n"
                             "This prevents false negatives.\n"
                         )
-                        messages.append(Message(role="system", content=guard_message))
+                        session_manager.add_system_message(session_id, guard_message)
                         ctx.obj["_low_count_verified"] = True
 
             if consecutive_fails >= 3:

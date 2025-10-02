@@ -5,7 +5,8 @@ import json
 import re
 import time
 from dataclasses import InitVar, dataclass, field
-from typing import List, Optional, Sequence
+from typing import List, Optional
+from uuid import uuid4
 
 from ai_dev_agent.providers.llm import (
     LLMClient,
@@ -15,6 +16,7 @@ from ai_dev_agent.providers.llm import (
     Message,
 )
 from ai_dev_agent.core.utils.logger import get_logger
+from ai_dev_agent.session import SessionManager, build_system_messages
 
 LOGGER = get_logger(__name__)
 
@@ -210,12 +212,15 @@ class Planner:
 
     def __init__(self, client: LLMClient) -> None:
         self.client = client
+        self._session_manager = SessionManager.get_instance()
 
     def generate(
         self,
         goal: str,
         project_structure: Optional[str] = None,
         context: Optional[PlanningContext] = None,
+        *,
+        session_id: Optional[str] = None,
     ) -> PlanResult:
         LOGGER.info("Requesting plan from LLM for goal: %s", goal)
         plan_context = context or PlanningContext()
@@ -230,16 +235,32 @@ class Planner:
             context_block=context_block,
         )
 
-        messages: Sequence[Message] = (
-            Message(role="system", content=SYSTEM_PROMPT),
-            Message(role="user", content=user_prompt),
+        session_key = session_id or f"planner-{uuid4()}"
+        system_messages = build_system_messages(
+            include_react_guidance=False,
+            extra_messages=[SYSTEM_PROMPT],
         )
+        session = self._session_manager.ensure_session(
+            session_key,
+            system_messages=system_messages,
+            metadata={
+                "mode": "planner",
+                "goal": goal,
+                "context_snapshot": context_block,
+            },
+        )
+
+        with session.lock:
+            session.metadata["history_anchor"] = len(session.history)
+
+        self._session_manager.add_user_message(session_key, user_prompt)
         start_time = time.time()
         next_heartbeat = start_time + 10.0
         try:
             while True:
                 try:
-                    response_text = self.client.complete(messages, temperature=0.1)
+                    conversation = self._session_manager.compose(session_key)
+                    response_text = self.client.complete(conversation, temperature=0.1)
                     break
                 except LLMTimeoutError:
                     now = time.time()
@@ -259,6 +280,10 @@ class Planner:
             LOGGER.warning("LLM planning failed, generating fallback plan: %s", exc)
             tasks = self._create_generic_fallback(goal)
             summary = f"Fallback plan for: {goal}"[:80]
+            self._session_manager.add_system_message(
+                session_key,
+                f"Planner fallback invoked due to error: {exc}",
+            )
             return PlanResult(
                 goal=goal,
                 summary=summary,
@@ -270,6 +295,7 @@ class Planner:
                 complexity=None,
                 success_criteria=[],
             )
+        self._session_manager.add_assistant_message(session_key, response_text)
         try:
             payload = self._extract_json(response_text)
         except json.JSONDecodeError as exc:

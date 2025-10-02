@@ -4,17 +4,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from ai_dev_agent.cli.utils import build_system_context
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
-from ai_dev_agent.providers.llm.base import (
-    LLMClient,
-    LLMError,
-    Message,
-    ToolCallResult,
-)
+from ai_dev_agent.providers.llm.base import LLMClient, LLMError, ToolCallResult
 from ai_dev_agent.tools import registry as tool_registry
+from ai_dev_agent.session import SessionManager, build_system_messages
 
 DEFAULT_TOOLS: List[Dict[str, Any]] = []
 
@@ -49,6 +46,8 @@ class IntentRouter:
         self.tools = tools or self._build_tool_list(settings)
         self.project_profile = project_profile or {}
         self.tool_success_history = tool_success_history or {}
+        self._session_manager = SessionManager.get_instance()
+        self._session_id = f"router-{uuid4()}"
 
     def _build_tool_list(self, settings: Settings) -> List[Dict[str, Any]]:
         """Combine core tools with selected registry tools, avoiding duplicates."""
@@ -125,27 +124,49 @@ class IntentRouter:
         if self.client is None:
             raise IntentRoutingError("No LLM client available; fallback routing is disabled.")
 
-        messages = [
-            Message(
-                role="system",
-                content=self._system_prompt(),
-            ),
-            Message(role="user", content=prompt.strip()),
-        ]
+        system_messages = build_system_messages(
+            include_react_guidance=False,
+            extra_messages=[self._system_prompt()],
+        )
+        session = self._session_manager.ensure_session(
+            self._session_id,
+            system_messages=system_messages,
+            metadata={
+                "mode": "intent-router",
+                "project_profile": self.project_profile,
+            },
+        )
+        with session.lock:
+            session.metadata["last_prompt"] = prompt.strip()
+
+        self._session_manager.add_user_message(self._session_id, prompt.strip())
 
         try:
             result: ToolCallResult = self.client.invoke_tools(
-                messages,
+                self._session_manager.compose(self._session_id),
                 tools=self.tools,
                 temperature=0.1,
             )
         except LLMError as exc:
+            self._session_manager.add_system_message(
+                self._session_id,
+                f"Intent routing error: {exc}",
+            )
             raise IntentRoutingError(f"LLM tool call failed: {exc}") from exc
         except Exception as exc:
+            self._session_manager.add_system_message(
+                self._session_id,
+                f"Intent routing failure: {exc}",
+            )
             raise IntentRoutingError(f"Intent routing failed: {exc}") from exc
 
         if result.calls:
             call = result.calls[0]
+            self._session_manager.add_assistant_message(
+                self._session_id,
+                result.message_content,
+                tool_calls=result.raw_tool_calls,
+            )
             return IntentDecision(
                 tool=call.name,
                 arguments=call.arguments,
@@ -153,6 +174,10 @@ class IntentRouter:
             )
 
         if result.message_content:
+            self._session_manager.add_assistant_message(
+                self._session_id,
+                result.message_content,
+            )
             # No tool used; surface the response directly without invoking a handler.
             return IntentDecision(
                 tool=None,
@@ -160,6 +185,10 @@ class IntentRouter:
             )
 
         raise IntentRoutingError("Model response did not include a tool call or content.")
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     def _system_prompt(self) -> str:
         workspace = str(self.settings.workspace_root or ".")

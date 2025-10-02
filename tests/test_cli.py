@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import List
 
 from click.testing import CliRunner
 
@@ -6,6 +7,8 @@ import ai_dev_agent.cli as cli_module
 from ai_dev_agent.cli import infer_task_files, cli
 from ai_dev_agent.cli.router import IntentDecision
 from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.providers.llm.base import Message
+from ai_dev_agent.session import SessionManager, build_system_messages
 
 
 def test_infer_task_files_from_commands(tmp_path: Path) -> None:
@@ -86,6 +89,7 @@ def test_cli_rejects_deprecated_list_directory_tool(monkeypatch, tmp_path: Path)
             self.client = client
             self.settings = settings_obj
             self.extra = kwargs
+            self.session_id = "dummy-router"
 
         def route(self, prompt: str) -> IntentDecision:
             assert "дир" in prompt
@@ -119,6 +123,7 @@ def test_query_command_invokes_router(monkeypatch, tmp_path: Path) -> None:
             self.client = client
             self.settings = settings_obj
             self.extra = kwargs
+            self.session_id = "dummy-router"
 
         def route(self, prompt: str) -> IntentDecision:
             captures.setdefault("prompt", prompt)
@@ -134,3 +139,41 @@ def test_query_command_invokes_router(monkeypatch, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert result.output.strip() == "ok"
     assert captures["prompt"] == "hello world"
+
+
+def test_diagnostics_command(monkeypatch, tmp_path: Path) -> None:
+    manager = SessionManager.get_instance()
+    with manager._lock:  # type: ignore[attr-defined]
+        manager._sessions.clear()  # type: ignore[attr-defined]
+
+    session_id = "test-session"
+    system_messages = build_system_messages(
+        include_react_guidance=False,
+        extra_messages=["Diagnostics test"],
+    )
+    manager.ensure_session(session_id, system_messages=system_messages, metadata={"mode": "test"})
+    manager.extend_history(
+        session_id,
+        [
+            Message(role="user", content="diagnostic test"),
+            Message(role="assistant", content="ack"),
+        ],
+    )
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    settings = Settings()
+    settings.workspace_root = repo_root
+    settings.state_file = repo_root / ".devagent" / "state.json"
+    settings.ensure_state_dir()
+    settings.api_key = "test"
+    monkeypatch.setattr(cli_module, "load_settings", lambda path=None: settings)
+    monkeypatch.chdir(repo_root)
+
+    runner = CliRunner()
+    diag_result = runner.invoke(cli, ["diagnostics", "--session", session_id])
+
+    assert diag_result.exit_code == 0, diag_result.output
+    assert f"Session 1: {session_id}" in diag_result.output
+    assert "[user] diagnostic test" in diag_result.output

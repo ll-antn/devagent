@@ -7,9 +7,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
 from ai_dev_agent.core.approval.approvals import ApprovalManager
-from ai_dev_agent.providers.llm import LLMClient, LLMError, Message
+from ai_dev_agent.providers.llm import LLMClient, LLMError
+from ai_dev_agent.session import SessionManager, build_system_messages
 from ai_dev_agent.tools.execution.testing.local_tests import TestResult, TestRunner
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.logger import get_logger
@@ -135,6 +137,22 @@ class CodeEditor:
         # Fix attempt tracking
         self.fix_attempts: List[FixAttempt] = []
 
+        # Session management
+        self._session_manager = SessionManager.get_instance()
+        self._session_id = f"editor-{uuid4()}"
+        self._base_system_messages = build_system_messages(
+            include_react_guidance=False,
+            extra_messages=[SYSTEM_PROMPT],
+        )
+        self._session_manager.ensure_session(
+            self._session_id,
+            system_messages=self._base_system_messages,
+            metadata={
+                "mode": "code-editor",
+                "repo_root": str(self.repo_root),
+            },
+        )
+
     def gather_context(
         self, 
         files: Iterable[str], 
@@ -202,16 +220,33 @@ class CodeEditor:
             )
         
         # Get LLM response
+        session = self._session_manager.ensure_session(
+            self._session_id,
+            system_messages=self._base_system_messages,
+            metadata={
+                "mode": "code-editor",
+                "task": task_description,
+            },
+        )
+        with session.lock:
+            session.metadata["last_context_summary"] = {
+                "style": style_profile,
+                "dependency": dependency_profile,
+            }
+        self._session_manager.add_user_message(self._session_id, prompt)
+
         try:
             response = self.llm_client.complete(
-                [
-                    Message(role="system", content=SYSTEM_PROMPT),
-                    Message(role="user", content=prompt),
-                ],
+                self._session_manager.compose(self._session_id),
                 temperature=0.2 if not previous_attempts else 0.3,  # Slightly higher temp for fixes
             )
+            self._session_manager.add_assistant_message(self._session_id, response)
         except LLMError as exc:
             LOGGER.warning("Diff proposal fallback engaged: %s", exc)
+            self._session_manager.add_system_message(
+                self._session_id,
+                f"Code editor fallback due to error: {exc}",
+            )
             guidance = self._build_fallback_guidance(task_description, contexts, str(exc))
             return DiffProposal(
                 diff="",
