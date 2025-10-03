@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from ai_dev_agent.engine.metrics.collectors import MetricsCollector, build_metrics_snapshot
 from ai_dev_agent.tools.execution.testing.local_tests import TestResult
 

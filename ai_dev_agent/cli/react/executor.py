@@ -1029,7 +1029,72 @@ def _execute_react_assistant(
     if iteration >= iteration_cap:
         click.echo(f"⚠️  Reached maximum iteration limit ({iteration_cap}).")
         click.echo("Please refine your request or increase DEVAGENT_MAX_ITERATIONS if you need more steps.")
+
         execution_completed = True
+
+        final_response_text: Optional[str] = None
+        session_snapshot: Optional[List[Message]] = None
+
+        try:
+            session_snapshot = session_manager.compose(session_id)
+        except Exception:
+            session_snapshot = None
+
+        if session_snapshot and hasattr(client, "complete"):
+            summary_prompt = (
+                "Iteration limit reached before the task completed. Synthesize the best possible final answer "
+                "using the available tool outputs and conversation so far. Summarize completed work, key "
+                "findings, and recommended next steps. Make it clear that the iteration cap prevented "
+                "additional actions. Do not request further tool calls."
+            )
+
+            final_messages = list(session_snapshot)
+            final_messages.append(Message(role="user", content=summary_prompt))
+
+            try:
+                response_text = client.complete(final_messages, temperature=0.1)
+            except Exception as exc:
+                click.echo(f"⚠️  Unable to obtain final response from LLM: {exc}")
+            else:
+                if isinstance(response_text, str):
+                    response_text = response_text.strip()
+                if response_text:
+                    session_manager.add_user_message(session_id, summary_prompt)
+                    session_manager.add_assistant_message(session_id, response_text)
+                    final_response_text = response_text
+                    if history_enabled and isinstance(ctx.obj, dict):
+                        stored_history_raw = ctx.obj.get("_shell_conversation_history")
+                        if isinstance(stored_history_raw, list):
+                            stored_history = [
+                                msg for msg in stored_history_raw if isinstance(msg, Message)
+                            ]
+                        else:
+                            stored_history = []
+                        stored_history.extend(
+                            [
+                                Message(role="user", content=summary_prompt),
+                                Message(role="assistant", content=response_text),
+                            ]
+                        )
+                        ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
+                            stored_history,
+                            max_history_turns,
+                        )
+                    click.echo("\n📌 Final response from model (iteration limit reached):")
+                    click.echo(response_text)
+
+        if not final_response_text and session_snapshot:
+            fallback_text: Optional[str] = None
+            for message in reversed(session_snapshot):
+                if getattr(message, "role", None) == "assistant" and message.content:
+                    candidate = str(message.content).strip()
+                    if candidate:
+                        fallback_text = candidate
+                        break
+            if fallback_text:
+                click.echo("\n📌 Most recent assistant message before stopping:")
+                click.echo(fallback_text)
+
         _finalize()
 
 

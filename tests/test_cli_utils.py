@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import platform
-from pathlib import Path
-
-import pytest
 
 from ai_dev_agent.cli.utils import build_system_context
 

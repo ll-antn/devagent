@@ -1,7 +1,6 @@
 """Enhanced utilities for diff validation, preview, and application."""
 from __future__ import annotations
 
-import difflib
 import re
 import shutil
 import subprocess

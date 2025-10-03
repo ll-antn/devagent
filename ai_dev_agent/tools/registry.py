@@ -5,9 +5,9 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping
 
-from jsonschema import Draft7Validator, ValidationError
+from jsonschema import Draft7Validator
 
 from ai_dev_agent.core.utils.logger import get_logger
 
