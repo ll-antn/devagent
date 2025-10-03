@@ -10,6 +10,7 @@ from ai_dev_agent.cli.react.executor import _execute_react_assistant
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.providers.llm.base import Message, ToolCall, ToolCallResult
 from ai_dev_agent.cli.handlers import registry_handlers
+from ai_dev_agent.session import SessionManager
 
 
 class FakeClient:
@@ -193,3 +194,86 @@ def test_shell_history_records_user_without_response(capsys) -> None:
     assert len(history) == 1
     assert history[0].role == "user"
     assert history[0].content == "No answer?"
+
+
+def test_adds_dummy_tool_message_for_raw_tool_calls(capsys) -> None:
+    settings = Settings()
+    raw_tool_calls = [
+        {
+            "id": "call-missing-func",
+            "type": "function",
+            "function": {"name": "non_existent", "arguments": "{}"},
+        }
+    ]
+    client = FakeClient(
+        [
+            ToolCallResult(
+                calls=[],
+                message_content="Fallback response",
+                raw_tool_calls=raw_tool_calls,
+            )
+        ]
+    )
+
+    ctx = _make_context(settings)
+
+    _execute_react_assistant(ctx, client, settings, "Trigger tool fallback", use_planning=False)
+
+    session_id = ctx.obj.get("_session_id")
+    assert session_id, "Session ID should be recorded on context"
+
+    session_manager = SessionManager.get_instance()
+    session = session_manager.get_session(str(session_id))
+    tool_messages = [msg for msg in session.history if msg.role == "tool"]
+
+    assert any(
+        msg.tool_call_id == "call-missing-func" and "not executed" in (msg.content or "")
+        for msg in tool_messages
+    ), "Expected a dummy tool response tied to the raw tool call identifier"
+
+
+def test_generates_tool_call_id_when_provider_omits_id(monkeypatch, capsys) -> None:
+    settings = Settings()
+    raw_tool_calls = [
+        {
+            "type": "function",
+            "function": {"name": "fake_tool_missing_id", "arguments": "{}"},
+        }
+    ]
+    client = FakeClient(
+        [
+            ToolCallResult(
+                calls=[ToolCall(name="fake_tool_missing_id", arguments={}, call_id=None)],
+                message_content="Requesting tool",
+                raw_tool_calls=raw_tool_calls,
+            ),
+            ToolCallResult(calls=[], message_content="Tool completed", raw_tool_calls=None),
+        ]
+    )
+
+    ctx = _make_context(settings)
+
+    def fake_handler(_ctx, _arguments):
+        print("fake tool executed")
+
+    monkeypatch.setitem(registry_handlers.INTENT_HANDLERS, "fake_tool_missing_id", fake_handler)
+
+    _execute_react_assistant(ctx, client, settings, "Run missing-id tool", use_planning=False)
+
+    session_id = ctx.obj.get("_session_id")
+    assert session_id
+
+    session_manager = SessionManager.get_instance()
+    session = session_manager.get_session(str(session_id))
+
+    tool_messages = [msg for msg in session.history if msg.role == "tool"]
+    assert tool_messages, "Expected at least one tool message"
+    call_id = tool_messages[0].tool_call_id
+    assert call_id, "Generated tool call id should not be falsy"
+
+    assistant_tool_messages = [
+        msg for msg in session.history if msg.role == "assistant" and msg.tool_calls
+    ]
+    assert assistant_tool_messages, "Assistant should record tool call metadata"
+    first_tool_call = assistant_tool_messages[0].tool_calls[0]
+    assert first_tool_call.get("id") == call_id

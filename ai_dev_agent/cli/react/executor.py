@@ -141,6 +141,54 @@ def _emit_context_snapshot(
 
 
 
+def _ensure_tool_call_identifiers(
+    raw_tool_calls: Optional[Sequence[Any]],
+    parsed_calls: Optional[Sequence[Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Guarantee each tool call has a usable identifier for follow-up messages."""
+
+    if not raw_tool_calls:
+        return raw_tool_calls
+
+    used_ids: Set[str] = set()
+    for entry in raw_tool_calls:
+        if isinstance(entry, Mapping):
+            existing = entry.get("id") or entry.get("tool_call_id")
+            if isinstance(existing, str) and existing:
+                used_ids.add(existing)
+
+    normalized: List[Dict[str, Any]] = []
+    for index, entry in enumerate(raw_tool_calls):
+        if isinstance(entry, Mapping):
+            entry_dict: Dict[str, Any] = dict(entry)
+        else:
+            entry_dict = getattr(entry, "__dict__", {}).copy()
+            if not entry_dict:
+                entry_dict = {"raw": entry}
+
+        call_id = entry_dict.get("id") or entry_dict.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            while True:
+                candidate = f"auto-tool-{index}-{uuid4().hex[:8]}"
+                if candidate not in used_ids:
+                    call_id = candidate
+                    used_ids.add(candidate)
+                    break
+            entry_dict["id"] = call_id
+        else:
+            used_ids.add(call_id)
+
+        normalized.append(entry_dict)
+
+        if parsed_calls and index < len(parsed_calls):
+            try:
+                parsed_calls[index].call_id = call_id
+            except AttributeError:
+                setattr(parsed_calls[index], "call_id", call_id)
+
+    return normalized
+
+
 def _summarize_arguments(arguments: Mapping[str, Any]) -> str:
     if not arguments:
         return "{}"
@@ -667,10 +715,14 @@ def _execute_react_assistant(
             conversation = session_manager.compose(session_id)
             result = client.invoke_tools(conversation, tools=tools_for_iteration, temperature=0.1)
 
+            normalized_tool_calls = _ensure_tool_call_identifiers(result.raw_tool_calls, result.calls)
+            if normalized_tool_calls is not None:
+                result.raw_tool_calls = normalized_tool_calls
+
             assistant_message = Message(
                 role="assistant",
                 content=result.message_content,
-                tool_calls=result.raw_tool_calls,
+                tool_calls=normalized_tool_calls,
             )
             if assistant_message.content is not None or assistant_message.tool_calls:
                 session_manager.extend_history(session_id, [assistant_message])
@@ -680,7 +732,13 @@ def _execute_react_assistant(
                 # to satisfy the API conversation format requirements
                 if assistant_message.tool_calls:
                     for tool_call in assistant_message.tool_calls:
-                        tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
+                        tool_call_id = None
+                        if isinstance(tool_call, Mapping):
+                            tool_call_id = tool_call.get("call_id") or tool_call.get("id")
+                        else:
+                            tool_call_id = getattr(tool_call, "call_id", None) or getattr(
+                                tool_call, "id", None
+                            )
                         if tool_call_id:
                             session_manager.add_tool_message(
                                 session_id,
