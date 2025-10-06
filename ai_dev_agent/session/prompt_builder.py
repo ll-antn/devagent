@@ -35,6 +35,7 @@ _PROVIDER_PREAMBLES: Dict[str, str] = {
     "deepseek": "DeepSeek models can emit multi-step tool calls; keep responses grounded in repository evidence and summarise final answers clearly.",
     "openai": "OpenAI GPT models support JSON function calls; prefer structured outputs when sharing lists or diagnostics.",
     "google": "Gemini models may rate-limit long outputs; batch tool calls and stream concise updates when possible.",
+    "openrouter": "OpenRouter routes to various providers; follow model-specific best practices and provide clear, structured responses.",
 }
 
 _DEFAULT_INSTRUCTION_GLOBS: Sequence[str] = (
@@ -119,6 +120,35 @@ def _provider_preamble(provider: str, model: Optional[str]) -> str:
     key = provider.lower().strip()
     if not key:
         return ""
+
+    # Detect model family for OpenRouter to apply appropriate optimizations
+    model_lower = (model or "").lower()
+    if key == "openrouter":
+        if "claude" in model_lower or "anthropic" in model_lower:
+            # Use Anthropic-specific guidance for Claude models via OpenRouter
+            anthropic_guidance = _PROVIDER_PREAMBLES.get("anthropic", "")
+            openrouter_base = _PROVIDER_PREAMBLES.get("openrouter", "")
+            combined = f"{anthropic_guidance} {openrouter_base}".strip()
+            if model:
+                return f"Model: {model} (via OpenRouter). {combined}"
+            return f"Provider: OpenRouter (Claude). {combined}"
+        elif "gpt" in model_lower or "openai" in model_lower:
+            # Use OpenAI-specific guidance for GPT models via OpenRouter
+            openai_guidance = _PROVIDER_PREAMBLES.get("openai", "")
+            openrouter_base = _PROVIDER_PREAMBLES.get("openrouter", "")
+            combined = f"{openai_guidance} {openrouter_base}".strip()
+            if model:
+                return f"Model: {model} (via OpenRouter). {combined}"
+            return f"Provider: OpenRouter (GPT). {combined}"
+        elif "gemini" in model_lower or "google" in model_lower:
+            # Use Google-specific guidance for Gemini models via OpenRouter
+            google_guidance = _PROVIDER_PREAMBLES.get("google", "")
+            openrouter_base = _PROVIDER_PREAMBLES.get("openrouter", "")
+            combined = f"{google_guidance} {openrouter_base}".strip()
+            if model:
+                return f"Model: {model} (via OpenRouter). {combined}"
+            return f"Provider: OpenRouter (Gemini). {combined}"
+
     base = _PROVIDER_PREAMBLES.get(key)
     if not base:
         return f"You are running on the {provider} provider{f' using {model}' if model else ''}. Optimise tool usage and produce grounded answers."

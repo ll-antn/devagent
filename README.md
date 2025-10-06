@@ -1,4 +1,4 @@
-# AI Dev Agent
+# DevAgent
 
 > **Proof of Concept**: LLM-powered CLI for development workflows. Interact with your codebase using natural language.
 
