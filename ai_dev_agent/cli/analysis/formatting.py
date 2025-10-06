@@ -244,6 +244,15 @@ def _format_file_reading_tree(tool_call, main_arg: str, tool_output: str, file_c
     args = tool_call.arguments or {}
     path = args.get("path", "")
     start_line = args.get("start_line")
+    if start_line is None:
+        last_end_line = 0
+        if last_read and last_read.get("path") == path:
+            last_end_line = last_read.get("last_end_line") or 0
+        if last_end_line:
+            start_line = last_end_line + 1
+
+    if start_line is None:
+        start_line = 1
     canonical_name = canonical_tool_name(tool_call.name)
     display_name = display_tool_name(tool_call.name)
 
@@ -271,6 +280,9 @@ def _extract_end_line_from_output(tool_output: str) -> int:
     match = re.search(r"lines (\d+)-(\d+) of (\d+)", tool_output)
     if match:
         return int(match.group(2))
+    numbered_lines = list(re.finditer(r"^\s*(\d+):", tool_output, re.MULTILINE))
+    if numbered_lines:
+        return int(numbered_lines[-1].group(1))
     return 0
 
 

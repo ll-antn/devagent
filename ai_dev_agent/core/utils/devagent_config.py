@@ -36,6 +36,7 @@ class DevAgentConfig:
     ctags_refresh_sec: Optional[int] = None
     react_iteration_global_cap: Optional[int] = None
     react_phase_overrides: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    budget_control: Dict[str, Any] = field(default_factory=dict)
 
 
 def load_devagent_yaml(path: Path | None = None) -> Optional[DevAgentConfig]:
@@ -65,6 +66,7 @@ def load_devagent_yaml(path: Path | None = None) -> Optional[DevAgentConfig]:
     ctags = index.get("ctags") or {}
     react = data.get("react") or {}
     react_iteration = react.get("iteration") or {}
+    budget_control_cfg = data.get("budget_control") or {}
 
     def g(name: str, d: Dict[str, Any]) -> Optional[str]:
         v = d.get("cmd")
@@ -127,6 +129,9 @@ def load_devagent_yaml(path: Path | None = None) -> Optional[DevAgentConfig]:
                 parsed_overrides[str(task_name)] = normalized
         if parsed_overrides:
             cfg.react_phase_overrides = parsed_overrides
+
+    if isinstance(budget_control_cfg, dict):
+        cfg.budget_control = budget_control_cfg
 
     return cfg
 

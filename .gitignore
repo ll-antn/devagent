@@ -1,6 +1,7 @@
 # Local DevAgent configuration
 .devagent.toml
 .devagent/
+.devagent_cache/
 
 # Python bytecode and caches
 __pycache__/

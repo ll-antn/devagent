@@ -131,8 +131,10 @@ registry.register(
         request_schema_path=SCHEMA_DIR / "fs.read.request.json",
         response_schema_path=SCHEMA_DIR / "fs.read.response.json",
         description=(
-            "Read one or more files from the repository. Provide 'paths' (list of strings) and "
-            "optionally 'context_lines' (int) or 'byte_range' ([start, end]) to limit the output."
+            "Read file contents from the repository. Provide 'paths' (list of file paths) to read. "
+            "Optional parameters: 'context_lines' (int) to limit output, or 'byte_range' ([start, end]) "
+            "for large files. Returns contents with line numbers. Use this AFTER code.search to examine "
+            "specific files you've located."
         ),
     )
 )
@@ -144,7 +146,9 @@ registry.register(
         request_schema_path=SCHEMA_DIR / "fs.write_patch.request.json",
         response_schema_path=SCHEMA_DIR / "fs.write_patch.response.json",
         description=(
-            "Validate and apply a unified diff. Requires 'diff' (string)."
+            "Apply a unified diff patch to modify existing files. Requires 'diff' (string in unified diff format). "
+            "Preferred over rewriting entire files as it shows precise changes and is safer. Automatically validates "
+            "patch format and applies changes atomically. Use this for surgical code modifications."
         ),
     )
 )

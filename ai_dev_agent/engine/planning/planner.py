@@ -223,7 +223,7 @@ class Planner:
         *,
         session_id: Optional[str] = None,
     ) -> PlanResult:
-        LOGGER.info("Requesting plan from LLM for goal: %s", goal)
+        LOGGER.debug("Requesting plan from LLM for goal: %s", goal)
         plan_context = context or PlanningContext()
         if plan_context.project_structure is None and project_structure:
             plan_context.project_structure = project_structure

@@ -247,8 +247,9 @@ registry.register(
         request_schema_path=SCHEMA_DIR / "symbols.index.request.json",
         response_schema_path=SCHEMA_DIR / "symbols.index.response.json",
         description=(
-            "Build or refresh the ctags symbol index for the repository. Accepts optional 'paths' "
-            "(list of directories/files) to scope the indexing."
+            "Build or refresh the ctags symbol index for the repository. Run this ONCE at session start "
+            "to enable fast symbol lookups. Accepts optional 'paths' (list of directories/files) to scope "
+            "indexing. Required before using symbols.find. Fast indexing of functions, classes, variables."
         ),
     )
 )
@@ -260,8 +261,10 @@ registry.register(
         request_schema_path=SCHEMA_DIR / "symbols.find.request.json",
         response_schema_path=SCHEMA_DIR / "symbols.find.response.json",
         description=(
-            "Look up symbol definitions using the ctags index. Requires 'name'; optional 'kind' "
-            "and 'lang' refine the search."
+            "Look up symbol definitions using the ctags index (requires symbols.index to run first). "
+            "Provide 'name' (string) to find. Optional: 'kind' (function, class, variable, method, etc.) "
+            "and 'lang' (py, js, etc.) to refine search. Returns file path and line number of definitions. "
+            "Faster than code.search for finding where symbols are defined."
         ),
     )
 )

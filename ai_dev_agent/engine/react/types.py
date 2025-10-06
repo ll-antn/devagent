@@ -7,14 +7,41 @@ from typing import Any, Dict, List, Mapping, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 
+class ToolCall(BaseModel):
+    """Single tool invocation within a batched request."""
+
+    tool: str = Field(..., description="Registered tool identifier.")
+    args: Dict[str, Any] = Field(default_factory=dict, description="Keyword arguments for the tool.")
+    call_id: Optional[str] = Field(default=None, description="Unique identifier for this specific call.")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ToolResult(BaseModel):
+    """Result from executing a single tool in a batch."""
+
+    call_id: Optional[str] = Field(default=None, description="Identifier matching the tool call.")
+    tool: str = Field(..., description="Tool that was executed.")
+    success: bool = Field(..., description="Whether execution succeeded.")
+    outcome: str = Field(default="", description="Result summary.")
+    error: Optional[str] = Field(default=None, description="Error if failed.")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="Per-call metrics.")
+    wall_time: Optional[float] = Field(default=None, description="Execution time in seconds.")
+
+    model_config = ConfigDict(extra="allow")
+
+
 class ActionRequest(BaseModel):
     """Instruction for invoking a tool within the ReAct loop."""
 
     step_id: str
     thought: str = Field(..., description="Reasoning that led to the action.")
-    tool: str = Field(..., description="Registered tool identifier.")
+    tool: str = Field(..., description="Registered tool identifier (single-tool mode).")
     args: Dict[str, Any] = Field(default_factory=dict, description="Keyword arguments for the tool.")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Auxiliary data for logging.")
+
+    # Batch support
+    tool_calls: List[ToolCall] = Field(default_factory=list, description="Multiple tool calls for parallel execution.")
 
     model_config = ConfigDict(extra="allow")
 
@@ -29,6 +56,9 @@ class Observation(BaseModel):
     tool: Optional[str] = Field(default=None, description="Tool that produced the observation.")
     raw_output: Optional[str] = Field(default=None, description="Unstructured output for later inspection.")
     error: Optional[str] = Field(default=None, description="Error information if the action failed.")
+
+    # Batch support
+    results: List[ToolResult] = Field(default_factory=list, description="Per-call results for batched execution.")
 
     model_config = ConfigDict(extra="allow")
 

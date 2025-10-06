@@ -65,6 +65,7 @@ class ToolCallResult:
     calls: List[ToolCall]
     message_content: str | None = None
     raw_tool_calls: List[Dict[str, Any]] | None = None
+    _raw_response: Dict[str, Any] | None = None
 
 
 class LLMError(RuntimeError):
@@ -373,6 +374,7 @@ class HTTPChatLLMClient(LLMClient, ABC):
             calls=parsed_calls,
             message_content=message.get("content"),
             raw_tool_calls=tool_calls_raw or None,
+            _raw_response=data,
         )
 
     # ------------------------------------------------------------------

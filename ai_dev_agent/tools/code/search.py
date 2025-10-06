@@ -416,10 +416,11 @@ registry.register(
         request_schema_path=SCHEMA_DIR / "code.search.request.json",
         response_schema_path=SCHEMA_DIR / "code.search.response.json",
         description=(
-            "Search repository text for the provided query. By DEFAULT uses FIXED STRING matching - "
-            "regex patterns like 'def.*test' will be treated as literal strings. Set 'regex': true "
-            "to enable regex patterns. Supports optional 'where' (list of directories/files), and "
-            "'max_results' (int). Automatically falls back to a Python-based scan when ripgrep is unavailable."
+            "Search repository text for patterns (fixed string or regex). By DEFAULT uses FIXED STRING "
+            "matching - patterns like 'def.*test' will be treated as literal strings. Set 'regex': true "
+            "to enable regex mode. Supports optional 'where' (list of paths to search), 'file_type' "
+            "(e.g., 'py', 'js'), and 'max_results' (int, default 50). Fast and efficient using ripgrep "
+            "when available, with automatic fallback. Use this to discover files before reading them with fs.read."
         ),
     )
 )

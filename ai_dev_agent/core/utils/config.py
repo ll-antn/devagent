@@ -98,12 +98,36 @@ class Settings:
     search_max_results: int = 100
     disable_context_pruner: bool = False
     always_use_planning: bool = False
+    # Cost tracking settings
+    enable_cost_tracking: bool = True
+    cost_warning_threshold: float = 1.0  # USD
+    # Cache management settings
+    enable_cache_management: bool = True
+    cache_ttl_seconds: int = 300  # 5 minutes
+    # Reflection settings
+    enable_reflection: bool = True
+    max_reflections: int = 3
+    # Summarization settings
+    enable_summarization: bool = True
+    summarization_model: Optional[str] = None  # Use cheaper model if specified
+    # Adaptive budget settings
+    adaptive_budget_scaling: bool = True
+    enable_two_tier_pruning: bool = True
+    # Retry settings
+    enable_retry: bool = True
+    retry_max_attempts: int = 5
+    retry_initial_delay: float = 0.125
+    retry_max_delay: float = 60.0
     context_pruner_max_total_tokens: int = 12_000
     context_pruner_trigger_tokens: Optional[int] = None
     context_pruner_trigger_ratio: float = 0.8
     context_pruner_keep_recent_messages: int = 10
     context_pruner_summary_max_chars: int = 1_200
     context_pruner_max_event_history: int = 10
+
+    # Agent context synthesis settings (unified mode is now always enabled)
+    agent_context_synthesis: bool = True    # Synthesize context from previous steps
+    agent_max_context_chars: int = 2000     # Max chars for context synthesis
 
     def ensure_state_dir(self) -> None:
         """Ensure the directory for the state file exists."""
@@ -146,6 +170,7 @@ def _load_from_env(prefix: str = "DEVAGENT_") -> Dict[str, Any]:
             "structured_logging",
             "disable_context_pruner",
             "always_use_planning",
+            "agent_context_synthesis",
         }:
             env[field] = _cast_bool(value)
         elif field in {
@@ -172,6 +197,7 @@ def _load_from_env(prefix: str = "DEVAGENT_") -> Dict[str, Any]:
             "context_pruner_keep_recent_messages",
             "context_pruner_summary_max_chars",
             "context_pruner_max_event_history",
+            "agent_max_context_chars",
         }:
             env[field] = int(value)
         elif field in {"patch_coverage_target", "context_pruner_trigger_ratio"}:

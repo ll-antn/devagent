@@ -45,11 +45,34 @@ from ai_dev_agent.providers.llm import (
     LLMTimeoutError,
 )
 from ai_dev_agent.providers.llm.base import Message
-from ai_dev_agent.session import SessionManager, build_system_messages
+from ai_dev_agent.session import SessionManager
+from ai_dev_agent.session.context_synthesis import ContextSynthesizer
 
 from ..analysis.formatting import _format_enhanced_tool_log
 from ..analysis.research import _handle_question_without_llm
 from ..router import IntentDecision, IntentRouter as _DEFAULT_INTENT_ROUTER
+from .budget_control import (
+    BudgetManager,
+    AdaptiveBudgetManager,
+    ReflectionContext,
+    PHASE_PROMPTS,
+    create_text_only_tool,
+    auto_generate_summary,
+    combine_partial_responses,
+    extract_text_content,
+    get_tools_for_iteration,
+)
+
+# Import ComponentIntegration for centralized feature management
+try:
+    from ai_dev_agent.core.integration import ComponentIntegration
+except ImportError:
+    ComponentIntegration = None
+from ai_dev_agent.core.utils.budget_integration import (
+    create_budget_integration,
+    BudgetIntegration,
+)
+from ai_dev_agent.core.utils.cost_tracker import TokenUsage
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -294,7 +317,30 @@ def _execute_react_assistant(
             click.echo("⚡ Direct execution mode")
             direct_mode_announced = True
 
+    # Initialize budget_integration early to avoid closure issues
+    budget_integration = None
+    budget_manager = None
+    session_manager = None
+    session_id = None
+
     def _finalize() -> None:
+        # Cost summary display removed - internal tracking still active
+        # Save to session metadata if session exists
+        if execution_completed and budget_integration and budget_integration.cost_tracker:
+            if session_manager and session_id:
+                session = session_manager.get_session(session_id)
+                session.metadata["cost_summary"] = {
+                    "total_cost": budget_integration.cost_tracker.total_cost_usd,
+                    "total_tokens": (
+                        budget_integration.cost_tracker.total_prompt_tokens +
+                        budget_integration.cost_tracker.total_completion_tokens
+                    ),
+                    "phase_costs": budget_integration.cost_tracker.phase_costs,
+                    "model_costs": budget_integration.cost_tracker.model_costs,
+                }
+
+            # Cost artifact generation disabled - no output needed
+
         if execution_completed and should_emit_status:
             execution_time = time.time() - start_time
             mode_label = execution_mode
@@ -404,20 +450,93 @@ def _execute_react_assistant(
 
     iteration_cap = global_max_iterations
 
-    session_manager = SessionManager.get_instance()
-    session_id = ctx_obj.get("_session_id")
-    if not session_id:
-        session_id = f"cli-{uuid4()}"
-        ctx_obj["_session_id"] = session_id
+    budget_control_settings: Dict[str, Any] = {}
+    if devagent_cfg and getattr(devagent_cfg, "budget_control", None):
+        if isinstance(devagent_cfg.budget_control, dict):
+            budget_control_settings = dict(devagent_cfg.budget_control)
 
-    system_messages = build_system_messages(
-        iteration_cap=iteration_cap,
-        repository_language=repository_language,
-        provider=getattr(settings, "provider", None),
-        model=getattr(settings, "model", None),
-        workspace_root=repo_root,
-        settings=settings,
-    )
+    configured_cap = budget_control_settings.get("max_iterations")
+    if isinstance(configured_cap, int) and configured_cap > 0:
+        iteration_cap = min(iteration_cap, configured_cap)
+
+    phase_thresholds = budget_control_settings.get("phases")
+    warning_settings = budget_control_settings.get("warnings")
+    tool_settings = budget_control_settings.get("tools") or {}
+    synthesis_settings = budget_control_settings.get("synthesis") or {}
+    auto_summary_enabled = bool(synthesis_settings.get("auto_summary_on_failure", True))
+
+    # Initialize adaptive budget manager with model context
+    model_context_window = getattr(settings, 'model_context_window', 100000)
+
+    # Initialize ComponentIntegration if available for centralized feature management
+    component_integration = None
+    if ComponentIntegration:
+        try:
+            component_integration = ComponentIntegration(
+                project_root=Path.cwd(),
+                settings=settings,
+                enable_all=True  # Enable all features by default
+            )
+            # Initialize components
+            component_integration.initialize_repo_map()
+            component_integration.initialize_tool_tracker()
+            component_integration.initialize_agent_manager()
+        except Exception as e:
+            LOGGER.debug(f"ComponentIntegration initialization failed: {e}")
+            component_integration = None
+
+    # Always use AdaptiveBudgetManager for best performance (features enabled by default)
+    # Only fall back to basic BudgetManager if explicitly disabled
+    use_adaptive = getattr(settings, 'enable_reflection', True) or getattr(settings, 'adaptive_budget_scaling', True)
+
+    if use_adaptive:
+        # Try to use the enhanced adaptive budget from integration if available
+        if component_integration:
+            budget_manager = component_integration.initialize_budget_manager(
+                max_iterations=iteration_cap,
+                model_context_window=model_context_window
+            )
+
+        # Fall back to the existing AdaptiveBudgetManager if integration fails
+        if not budget_manager:
+            budget_manager = AdaptiveBudgetManager(
+                iteration_cap,
+                phase_thresholds=phase_thresholds if isinstance(phase_thresholds, dict) else None,
+                warnings=warning_settings if isinstance(warning_settings, dict) else None,
+                model_context_window=model_context_window,
+                adaptive_scaling=getattr(settings, 'adaptive_budget_scaling', True),
+                enable_reflection=getattr(settings, 'enable_reflection', True),
+                max_reflections=getattr(settings, 'max_reflections', 3),
+            )
+    else:
+        # Only use basic BudgetManager if explicitly requested
+        budget_manager = BudgetManager(
+            iteration_cap,
+            phase_thresholds=phase_thresholds if isinstance(phase_thresholds, dict) else None,
+            warnings=warning_settings if isinstance(warning_settings, dict) else None,
+        )
+
+    # Initialize budget integration for cost tracking and retry (reassign from outer scope)
+    # Check if we're in test mode (disable by default for tests)
+    is_test_mode = os.environ.get('PYTEST_CURRENT_TEST') is not None
+
+    if not is_test_mode and (settings.enable_cost_tracking or settings.enable_retry or settings.enable_summarization):
+        budget_integration = create_budget_integration(settings)
+        # Initialize summarizer with the LLM client
+        if settings.enable_summarization and hasattr(client, 'complete'):
+            budget_integration.initialize_summarizer(client)
+
+    session_manager = SessionManager.get_instance()
+    temp_session_id = ctx_obj.get("_session_id")
+    if not temp_session_id:
+        temp_session_id = f"cli-{uuid4()}"
+        ctx_obj["_session_id"] = temp_session_id
+    session_id = temp_session_id  # Assign to outer scope variable
+
+    # Start with minimal system messages - will be replaced by unified prompt
+    # This avoids tool information being added to confuse the model
+    system_messages = [Message(role="system", content="Initializing DEVAGENT assistant...")]
+
     session = session_manager.ensure_session(
         session_id,
         system_messages=system_messages,
@@ -598,21 +717,157 @@ def _execute_react_assistant(
             context_metadata=context_metadata if isinstance(context_metadata, Mapping) else None,
         )
 
-    def _update_iteration_budget(remaining_iterations: int) -> None:
-        status_prefix = "Current budget:"
+    def _extract_submit_answer(tool_calls: Sequence[Any] | None) -> Optional[str]:
+        if not tool_calls:
+            return None
+        for call in tool_calls:
+            name = getattr(call, "name", None)
+            if not isinstance(name, str):
+                name = call.get("name") if isinstance(call, Mapping) else None
+            if not isinstance(name, str):
+                name = str(name or "")
+            if not name:
+                continue
+            if canonical_tool_name(name) != "submit_final_answer":
+                continue
+            arguments = getattr(call, "arguments", None)
+            if not isinstance(arguments, Mapping):
+                arguments = call.get("arguments") if isinstance(call, Mapping) else None
+            if not isinstance(arguments, Mapping):
+                continue
+            answer = arguments.get("answer")
+            if isinstance(answer, str) and answer.strip():
+                return answer.strip()
+        return None
+
+    def _build_phase_prompt(
+        phase: str,
+        user_query: str,
+        context: str,
+        constraints: str,
+        workspace: str = None,
+        repository_language: str = None,
+    ) -> str:
+        """Build phase-based system prompt without step tracking."""
+
+        phase_guidance = PHASE_PROMPTS.get(phase)
+        if not phase_guidance:
+            phase_guidance = PHASE_PROMPTS.get("exploration", "Focus on the task at hand.")
+
+        # Language hints
+        lang_hint = ""
+        if repository_language:
+            lang_hints_map = {
+                "python": "Consider Python-specific patterns, check requirements.txt",
+                "javascript": "Check package.json, consider JS/TS patterns",
+                "java": "Check build files, consider Java patterns",
+                "c++": "Check build configuration, consider C++ patterns",
+                "go": "Check go.mod, consider Go patterns",
+            }
+            lang_hint = lang_hints_map.get(repository_language.lower(), "")
+
+        # Build prompt
+        prompt = f"""You are a development assistant analyzing a codebase.
+
+TASK: {user_query}
+
+APPROACH:
+{phase_guidance}
+
+WORKSPACE: {workspace or 'current directory'}
+{f'LANGUAGE: {repository_language} - {lang_hint}' if lang_hint else ''}
+
+{'PREVIOUS DISCOVERIES:' if context else ''}
+{context if context else 'Beginning investigation...'}
+
+{'CONSTRAINTS:' if constraints else ''}
+{constraints if constraints else ''}"""
+
+        return prompt
+
+    def _build_synthesis_prompt(
+        user_query: str,
+        context: str,
+        workspace: str = None,
+    ) -> str:
+        """Build final synthesis prompt for last iteration (no tools)."""
+
+        synthesis_guidance = PHASE_PROMPTS.get("synthesis", "Provide your final response.")
+        prompt = f"""📋 FINAL SYNTHESIS ONLY
+
+Task: {user_query}
+
+{synthesis_guidance}
+
+Workspace: {workspace or 'current directory'}
+
+Investigation Summary:
+{context if context else 'No prior findings recorded.'}
+
+Instructions:
+- Respond with a complete, self-contained answer.
+- Cite specific files, paths, and relevant context.
+- Call out open questions or risks still unresolved.
+- DO NOT request more iterations or attempt tool usage.
+
+Begin your final answer now."""
+
+        return prompt
+
+    def _update_system_prompt(phase: str, is_final: bool = False) -> None:
+        """Update system prompt based on phase, without step tracking."""
+
+        # Clear all existing system messages
         session_manager.remove_system_messages(
             session_id,
-            lambda msg: isinstance(msg.content, str) and msg.content.startswith(status_prefix),
-        )
-        session_manager.add_system_message(
-            session_id,
-            f"{status_prefix} {remaining_iterations}/{iteration_cap} iterations remaining",
-            location="system",
+            lambda msg: True  # Remove all system messages
         )
 
-    if iteration_cap:
-        _update_iteration_budget(iteration_cap)
+        # Get original user query
+        session = session_manager.get_session(session_id)
+        user_query = "Complete the user's task"
+        for msg in session.history:
+            if msg.role == "user" and msg.content:
+                user_query = str(msg.content)[:500]
+                break
 
+        # Get context synthesis
+        synthesizer = ContextSynthesizer()
+        context = ""
+        constraints = ""
+
+        if len(session.history) > 0:
+            context = synthesizer.synthesize_previous_steps(
+                session.history,
+                current_step=len([m for m in session.history if m.role == "assistant"])
+            )
+            redundant_ops = synthesizer.get_redundant_operations(session.history)
+            constraints = synthesizer.build_constraints_section(redundant_ops)
+
+        # Build appropriate prompt
+        if is_final:
+            prompt = _build_synthesis_prompt(
+                user_query=user_query,
+                context=context,
+                workspace=str(repo_root),
+            )
+        else:
+            prompt = _build_phase_prompt(
+                phase=phase,
+                user_query=user_query,
+                context=context,
+                constraints=constraints,
+                workspace=str(repo_root),
+                repository_language=repository_language,
+            )
+
+        # Set as the only system message
+        system_message = Message(role="system", content=prompt)
+        with session.lock:
+            session.system_messages = [system_message]
+
+    # Initialize with exploration phase
+    _update_system_prompt(phase="exploration", is_final=False)
     _debug_context_snapshot(0)
 
     iteration = 0
@@ -620,22 +875,23 @@ def _execute_react_assistant(
     has_symbol_index = False
     files_discovered_set: Set[str] = set()
     last_tool_success = True
+    synthesized = False
 
-    while iteration < iteration_cap:
-        iteration += 1
+    while True:
+        context = budget_manager.next_iteration()
+        if context is None:
+            break
 
-        if iteration_cap:
-            _update_iteration_budget(max(iteration_cap - iteration, 0))
+        iteration = context.number
 
-        if iteration > 0 and iteration % 5 == 0:
-            progress_pct = (iteration / iteration_cap) * 100 if iteration_cap else 0.0
-            remaining = max(iteration_cap - iteration, 0) if iteration_cap else None
-            progress_msg = f"\n[Progress: {iteration}/{iteration_cap} iterations ({progress_pct:.0f}%)]"
-            if remaining is not None:
-                progress_msg += f" - {remaining} remaining"
-            if progress_pct >= 75:
-                progress_msg += " - Approaching limit, prioritize synthesis"
-            session_manager.add_system_message(session_id, progress_msg)
+        # Budget progress display removed - only tool logs will be shown
+
+        if context.is_final:
+            _update_system_prompt(phase="synthesis", is_final=True)
+            is_final_iteration = True
+        else:
+            _update_system_prompt(phase=context.phase, is_final=False)
+            is_final_iteration = False
 
         if iteration > 5 and isinstance(tool_success_tracker, dict) and tool_success_tracker:
             perf_summary: List[str] = []
@@ -671,14 +927,19 @@ def _execute_react_assistant(
             iteration_budget=iteration_cap,
         )
 
-        tools_for_iteration = available_tools
+        tools_for_iteration = get_tools_for_iteration(
+            context,
+            available_tools,
+            tool_config=tool_settings if isinstance(tool_settings, dict) else None,
+        )
         try:
             sanitized_to_entry: Dict[str, Dict[str, Any]] = {}
             sanitized_to_canonical: Dict[str, str] = {}
 
             _debug_context_snapshot(iteration)
 
-            for entry in available_tools:
+            # Use filtered tools, not available_tools
+            for entry in tools_for_iteration:
                 fn = entry.get("function", {})
                 sanitized = fn.get("name")
                 if not sanitized:
@@ -703,17 +964,73 @@ def _execute_react_assistant(
                 if sanitized not in used_sanitized:
                     prioritized_sanitized.append(sanitized)
 
-            tools_for_iteration = [
+            # Rebuild prioritized tools from filtered set
+            prioritized_tools = [
                 sanitized_to_entry[name]
                 for name in prioritized_sanitized
                 if name in sanitized_to_entry
-            ] or available_tools
+            ]
+            # Keep the filtered tools if prioritization fails
+            if not prioritized_tools:
+                prioritized_tools = tools_for_iteration
+            tools_for_iteration = prioritized_tools
         except Exception:
-            tools_for_iteration = available_tools
+            # On error, keep the filtered tools (not all available_tools)
+            pass  # tools_for_iteration already set by get_tools_for_iteration
 
         try:
             conversation = session_manager.compose(session_id)
-            result = client.invoke_tools(conversation, tools=tools_for_iteration, temperature=0.1)
+
+            # Execute with retry and cost tracking if integration is available
+            if budget_integration:
+                try:
+                    result = budget_integration.execute_with_retry(
+                        client.invoke_tools,
+                        conversation,
+                        tools=tools_for_iteration,
+                        temperature=0.1,
+                    )
+
+                    # Track cost if response contains usage data
+                    if hasattr(result, '_raw_response') and result._raw_response:
+                        budget_integration.track_llm_call(
+                            model=settings.model,
+                            response_data=result._raw_response,
+                            operation="tool_invocation",
+                            iteration=iteration,
+                            phase=context.phase,
+                        )
+
+                    # Cost warning disabled - tracking continues silently
+
+                except (LLMError, LLMTimeoutError, LLMConnectionError) as e:
+                    # Handle with reflection if available
+                    if isinstance(budget_manager, AdaptiveBudgetManager) and \
+                       context.reflection_allowed and budget_manager.allow_reflection(str(e)):
+                        click.echo(f"💭 Attempting reflection (attempt {budget_manager.reflection.current_reflection}/{budget_manager.reflection.max_reflections})")
+                        # Add reflection prompt to conversation
+                        reflection_msg = Message(
+                            role="system",
+                            content=f"Previous attempt failed: {e}. Please adjust your approach and try again."
+                        )
+                        session_manager.extend_history(session_id, [reflection_msg])
+                        continue  # Retry the iteration
+                    else:
+                        raise
+            else:
+                # Fallback to direct invocation
+                if is_final_iteration:
+                    result = client.invoke_tools(
+                        conversation,
+                        tools=tools_for_iteration,
+                        temperature=0.1,
+                    )
+                else:
+                    result = client.invoke_tools(
+                        conversation,
+                        tools=tools_for_iteration,
+                        temperature=0.1,
+                    )
 
             normalized_tool_calls = _ensure_tool_call_identifiers(result.raw_tool_calls, result.calls)
             if normalized_tool_calls is not None:
@@ -727,9 +1044,71 @@ def _execute_react_assistant(
             if assistant_message.content is not None or assistant_message.tool_calls:
                 session_manager.extend_history(session_id, [assistant_message])
 
+            submit_final_answer = None
+            if is_final_iteration:
+                submit_final_answer = _extract_submit_answer(result.calls)
+                if submit_final_answer:
+                    for tool_call in result.calls or []:
+                        raw_name = getattr(tool_call, "name", "")
+                        if not isinstance(raw_name, str):
+                            raw_name = str(raw_name or "")
+                        if canonical_tool_name(raw_name) != "submit_final_answer":
+                            continue
+                        tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
+                        if tool_call_id:
+                            session_manager.add_tool_message(session_id, tool_call_id, submit_final_answer)
+                        break
+                    click.echo(submit_final_answer)
+                    execution_completed = True
+                    synthesized = True
+                    _commit_shell_history()
+                    _finalize()
+                    return
+
             if not result.calls:
-                # If we have tool_calls but no result.calls, we need to add dummy tool responses
-                # to satisfy the API conversation format requirements
+                if is_final_iteration:
+                    final_text = extract_text_content(result)
+                    if not final_text:
+                        if auto_summary_enabled:
+                            conversation_snapshot = session_manager.compose(session_id)
+                            final_text = auto_generate_summary(
+                                conversation_snapshot,
+                                files_examined=files_discovered_set,
+                                searches_performed=search_queries,
+                            )
+                            click.echo("⚠️ Generated synthesis from investigation history:")
+                        else:
+                            final_text = "Model did not provide a final synthesis."
+                    click.echo(final_text)
+                    execution_completed = True
+                    synthesized = True
+                    _commit_shell_history()
+                    _finalize()
+                    return
+
+                if context.is_penultimate:
+                    early_text = extract_text_content(result)
+                    if not early_text:
+                        if auto_summary_enabled:
+                            conversation_snapshot = session_manager.compose(session_id)
+                            generated = auto_generate_summary(
+                                conversation_snapshot,
+                                files_examined=files_discovered_set,
+                                searches_performed=search_queries,
+                            )
+                            click.echo("⚠️ Early synthesis detected (penultimate iteration).")
+                            click.echo(generated)
+                            early_text = generated
+                        else:
+                            early_text = "Model ended without providing synthesis."
+                    click.echo(early_text)
+                    execution_completed = True
+                    synthesized = True
+                    _commit_shell_history()
+                    _finalize()
+                    return
+
+                # Non-final iteration with no tool calls – treat as completion
                 if assistant_message.tool_calls:
                     for tool_call in assistant_message.tool_calls:
                         tool_call_id = None
@@ -746,11 +1125,46 @@ def _execute_react_assistant(
                                 "Tool call was not executed.",
                             )
 
-                if result.message_content:
-                    click.echo(result.message_content)
-                else:
-                    click.echo("I was unable to provide a complete answer.")
+                fallback_text = extract_text_content(result) or "I was unable to provide a complete answer."
+                click.echo(fallback_text)
                 execution_completed = True
+                synthesized = True
+                _commit_shell_history()
+                _finalize()
+                return
+
+            if is_final_iteration and result.calls:
+                click.echo("\n⚠️  Iteration limit reached. Tool usage is blocked during synthesis.")
+
+                for tool_call in result.calls:
+                    tool_call_id = getattr(tool_call, "call_id", None) or getattr(tool_call, "id", None)
+                    if tool_call_id:
+                        session_manager.add_tool_message(
+                            session_id,
+                            tool_call_id,
+                            "Final iteration: tool execution skipped. Provide text synthesis instead.",
+                        )
+
+                partial_text = extract_text_content(result)
+                conversation_snapshot = session_manager.compose(session_id)
+                auto_summary = (
+                    auto_generate_summary(
+                        conversation_snapshot,
+                        files_examined=files_discovered_set,
+                        searches_performed=search_queries,
+                    )
+                    if auto_summary_enabled
+                    else ""
+                )
+                final_output = combine_partial_responses(partial_text, auto_summary)
+                if not final_output:
+                    final_output = (
+                        "Model did not provide a final synthesis. Consider increasing DEVAGENT_MAX_ITERATIONS."
+                    )
+
+                click.echo(final_output)
+                execution_completed = True
+                synthesized = True
                 _commit_shell_history()
                 _finalize()
                 return
@@ -759,6 +1173,11 @@ def _execute_react_assistant(
             last_tool_failed = consecutive_fails > 0
 
             for tool_call in result.calls:
+                tool_call_name = getattr(tool_call, "name", None)
+                if tool_call_name and canonical_tool_name(tool_call_name) == "submit_final_answer":
+                    # Already handled as final synthesis above
+                    continue
+
                 call_signature = tool_signature(tool_call)
                 if tool_call.name in FILE_READ_TOOLS:
                     targets = _normalize_read_targets(tool_call.arguments)
@@ -1026,76 +1445,82 @@ def _execute_react_assistant(
 
     _commit_shell_history()
 
-    if iteration >= iteration_cap:
+    if synthesized:
+        _finalize()
+        return
+
+    if budget_manager.current >= iteration_cap:
         click.echo(f"⚠️  Reached maximum iteration limit ({iteration_cap}).")
         click.echo("Please refine your request or increase DEVAGENT_MAX_ITERATIONS if you need more steps.")
+    else:
+        click.echo("⚠️  Execution stopped before providing a final synthesis.")
 
-        execution_completed = True
+    execution_completed = True
 
-        final_response_text: Optional[str] = None
-        session_snapshot: Optional[List[Message]] = None
+    session_snapshot: Optional[List[Message]] = None
+    try:
+        session_snapshot = session_manager.compose(session_id)
+    except Exception:
+        session_snapshot = None
+
+    final_response_text: Optional[str] = None
+
+    if session_snapshot:
+        summary_prompt = (
+            "Provide a final synthesis based on the conversation so far. "
+            "Summarize findings, actionable conclusions, and open questions."
+        )
+        session_manager.add_user_message(session_id, summary_prompt)
+        final_messages = session_manager.compose(session_id)
 
         try:
-            session_snapshot = session_manager.compose(session_id)
-        except Exception:
-            session_snapshot = None
-
-        if session_snapshot and hasattr(client, "complete"):
-            summary_prompt = (
-                "Iteration limit reached before the task completed. Synthesize the best possible final answer "
-                "using the available tool outputs and conversation so far. Summarize completed work, key "
-                "findings, and recommended next steps. Make it clear that the iteration cap prevented "
-                "additional actions. Do not request further tool calls."
+            result = client.invoke_tools(
+                final_messages,
+                tools=[create_text_only_tool()],
+                temperature=0.1,
             )
+        except Exception as exc:
+            click.echo(f"⚠️  Unable to obtain final response from LLM: {exc}")
+            result = None
+        else:
+            final_response_text = extract_text_content(result)
+            if final_response_text:
+                session_manager.add_assistant_message(session_id, final_response_text)
+                if history_enabled and isinstance(ctx.obj, dict):
+                    stored_history_raw = ctx.obj.get("_shell_conversation_history")
+                    stored_history = (
+                        [msg for msg in stored_history_raw if isinstance(msg, Message)]
+                        if isinstance(stored_history_raw, list)
+                        else []
+                    )
+                    stored_history.extend(
+                        [
+                            Message(role="user", content=summary_prompt),
+                            Message(role="assistant", content=final_response_text),
+                        ]
+                    )
+                    ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
+                        stored_history,
+                        max_history_turns,
+                    )
 
-            final_messages = list(session_snapshot)
-            final_messages.append(Message(role="user", content=summary_prompt))
+    if not final_response_text and session_snapshot and auto_summary_enabled:
+        auto_summary = auto_generate_summary(
+            session_snapshot,
+            files_examined=files_discovered_set,
+            searches_performed=search_queries,
+        )
+        final_response_text = auto_summary
+    elif not final_response_text:
+        final_response_text = "Model did not provide a final synthesis."
 
-            try:
-                response_text = client.complete(final_messages, temperature=0.1)
-            except Exception as exc:
-                click.echo(f"⚠️  Unable to obtain final response from LLM: {exc}")
-            else:
-                if isinstance(response_text, str):
-                    response_text = response_text.strip()
-                if response_text:
-                    session_manager.add_user_message(session_id, summary_prompt)
-                    session_manager.add_assistant_message(session_id, response_text)
-                    final_response_text = response_text
-                    if history_enabled and isinstance(ctx.obj, dict):
-                        stored_history_raw = ctx.obj.get("_shell_conversation_history")
-                        if isinstance(stored_history_raw, list):
-                            stored_history = [
-                                msg for msg in stored_history_raw if isinstance(msg, Message)
-                            ]
-                        else:
-                            stored_history = []
-                        stored_history.extend(
-                            [
-                                Message(role="user", content=summary_prompt),
-                                Message(role="assistant", content=response_text),
-                            ]
-                        )
-                        ctx.obj["_shell_conversation_history"] = _truncate_shell_history(
-                            stored_history,
-                            max_history_turns,
-                        )
-                    click.echo("\n📌 Final response from model (iteration limit reached):")
-                    click.echo(response_text)
+    if final_response_text:
+        click.echo("\n📌 Final response:")
+        click.echo(final_response_text)
+    else:
+        click.echo("❌ Model did not provide a usable final synthesis.")
 
-        if not final_response_text and session_snapshot:
-            fallback_text: Optional[str] = None
-            for message in reversed(session_snapshot):
-                if getattr(message, "role", None) == "assistant" and message.content:
-                    candidate = str(message.content).strip()
-                    if candidate:
-                        fallback_text = candidate
-                        break
-            if fallback_text:
-                click.echo("\n📌 Most recent assistant message before stopping:")
-                click.echo(fallback_text)
-
-        _finalize()
+    _finalize()
 
 
 __all__ = ["_execute_react_assistant"]

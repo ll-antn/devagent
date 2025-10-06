@@ -14,6 +14,11 @@ from ai_dev_agent.core.utils.context_budget import (
     summarize_text,
 )
 from .summarizer import ConversationSummarizer, HeuristicConversationSummarizer
+try:
+    from .enhanced_summarizer import EnhancedSummarizer, SummarizationConfig
+except ImportError:
+    EnhancedSummarizer = None
+    SummarizationConfig = None
 
 
 SUMMARY_PREFIX = "[Context summary]"
@@ -70,7 +75,15 @@ class ContextPruningService:
             keep_last_assistant=keep_last_assistant,
         )
         self._last_summarized_count = 0
-        self._summarizer = summarizer or HeuristicConversationSummarizer()
+
+        # Use EnhancedSummarizer if available, otherwise fall back to standard
+        if summarizer:
+            self._summarizer = summarizer
+        else:
+            # EnhancedSummarizer requires models to be provided, so we can't use it here
+            # without models. Fall back to HeuristicConversationSummarizer
+            self._summarizer = HeuristicConversationSummarizer()
+
         self._fallback_summarizer = HeuristicConversationSummarizer()
         self._logger = logging.getLogger(__name__)
 
