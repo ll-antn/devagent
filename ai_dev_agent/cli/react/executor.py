@@ -56,23 +56,55 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON from markdown code fence
+    # Try to extract JSON from markdown code fence (greedy to get full content)
     code_fence_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL)
     if code_fence_match:
         try:
-            return json.loads(code_fence_match.group(1))
+            return json.loads(code_fence_match.group(1).strip())
         except json.JSONDecodeError:
             pass
 
-    # Try to find JSON object or array in the text
-    # Look for outermost { } or [ ] using non-greedy quantifiers
-    for pattern in [r'\{.*?\}', r'\[.*?\]']:
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
+    # Find JSON by matching braces/brackets with proper nesting
+    # Try objects first (most common), then arrays
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        # Find first occurrence of start character
+        start_pos = text.find(start_char)
+        if start_pos == -1:
+            continue
+
+        # Track nesting depth to find matching closing character
+        depth = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start_pos, len(text)):
+            char = text[i]
+
+            # Handle string literals (JSON strings can contain braces/brackets)
+            if escape_next:
+                escape_next = False
                 continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            # Only count braces/brackets outside of strings
+            if not in_string:
+                if char == start_char:
+                    depth += 1
+                elif char == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        # Found complete JSON structure
+                        candidate = text[start_pos:i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            # This wasn't valid JSON, keep searching
+                            break
 
     return None
 
@@ -586,8 +618,10 @@ def _execute_react_assistant(
                 prompt += "\n\n# Output Format (OVERRIDES ALL OTHER FORMAT INSTRUCTIONS)\n"
                 prompt += "CRITICAL: Your response must be ONLY valid JSON conforming to this schema.\n"
                 prompt += "This JSON format requirement SUPERSEDES any other output format instructions above.\n"
-                prompt += "Do not include any explanatory text, markdown formatting, code fences, or line-based output.\n"
-                prompt += "Output raw JSON only.\n\n"
+                prompt += "Do not include ANY explanatory text, thinking process, markdown formatting, code fences, or line-based output.\n"
+                prompt += "Do not write anything before or after the JSON.\n"
+                prompt += "Start your response with { and end with }\n"
+                prompt += "Output raw JSON only - nothing else.\n\n"
                 prompt += "Required JSON Schema:\n"
                 prompt += json.dumps(format_schema, indent=2)
             else:
