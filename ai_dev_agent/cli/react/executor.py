@@ -1,7 +1,9 @@
 """Execution helpers for the CLI ReAct workflow."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from importlib import import_module
 from pathlib import Path
@@ -41,6 +43,38 @@ from .action_provider import LLMActionProvider
 from .budget_control import AdaptiveBudgetManager, BudgetManager, PHASE_PROMPTS, auto_generate_summary
 
 __all__ = ["_execute_react_assistant"]
+
+
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """Extract JSON from text, handling markdown code fences and surrounding text."""
+    if not text:
+        return None
+
+    # Try to parse the entire text as JSON first
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON from markdown code fence
+    code_fence_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL)
+    if code_fence_match:
+        try:
+            return json.loads(code_fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find JSON object or array in the text
+    # Look for outermost { } or [ ] using non-greedy quantifiers
+    for pattern in [r'\{.*?\}', r'\[.*?\]']:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                continue
+
+    return None
 
 
 class BudgetAwareExecutor(ReactiveExecutor):
@@ -286,6 +320,8 @@ def _execute_react_assistant(
     settings: Settings,
     user_prompt: str,
     use_planning: bool = False,
+    system_extension: Optional[str] = None,
+    format_schema: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Execute the CLI ReAct loop using the shared engine primitives."""
 
@@ -293,7 +329,14 @@ def _execute_react_assistant(
     planning_active = bool(use_planning)
     supports_tool_calls = hasattr(client, "invoke_tools")
     truncated_prompt = user_prompt if len(user_prompt) <= 50 else f"{user_prompt[:50]}..."
-    should_emit_status = planning_active or supports_tool_calls or bool(ctx.meta.pop("_emit_status_messages", False))
+
+    # Check for silent mode
+    if not isinstance(getattr(ctx, "obj", None), dict):
+        ctx.obj = {}
+    ctx_obj: Dict[str, Any] = ctx.obj
+    silent_mode = ctx_obj.get("silent_mode", False)
+
+    should_emit_status = (planning_active or supports_tool_calls or bool(ctx.meta.pop("_emit_status_messages", False))) and not silent_mode
     execution_mode = "with planning" if planning_active else "direct"
 
     if should_emit_status:
@@ -303,10 +346,6 @@ def _execute_react_assistant(
         else:
             click.echo(f"⚡ Executing: {truncated_prompt}")
             click.echo("⚡ Direct execution mode")
-
-    if not isinstance(getattr(ctx, "obj", None), dict):
-        ctx.obj = {}
-    ctx_obj: Dict[str, Any] = ctx.obj
 
     history_raw = ctx_obj.get("_shell_conversation_history")
     history_enabled = isinstance(history_raw, list)
@@ -358,7 +397,7 @@ def _execute_react_assistant(
         decision: IntentDecision = router.route(user_prompt)
         if not decision.tool:
             text = str(decision.arguments.get("text", "")).strip()
-            if text:
+            if text and not silent_mode:
                 click.echo(text)
             if history_enabled:
                 updated = history_messages + [user_message]
@@ -489,6 +528,7 @@ def _execute_react_assistant(
         session_id=session_id,
         tools=available_tools,
         budget_integration=budget_integration,
+        format_schema=format_schema,
     )
 
     tool_invoker = SessionAwareToolInvoker(
@@ -534,6 +574,30 @@ def _execute_react_assistant(
                 workspace=str(repo_root),
                 repository_language=repository_language,
             )
+
+        # Append custom system extension if provided
+        if system_extension:
+            prompt += f"\n\n# Custom Instructions\n{system_extension}"
+
+        # Add format schema instructions when present
+        if format_schema:
+            if is_final:
+                # Final iteration - must output JSON now
+                prompt += "\n\n# Output Format (OVERRIDES ALL OTHER FORMAT INSTRUCTIONS)\n"
+                prompt += "CRITICAL: Your response must be ONLY valid JSON conforming to this schema.\n"
+                prompt += "This JSON format requirement SUPERSEDES any other output format instructions above.\n"
+                prompt += "Do not include any explanatory text, markdown formatting, code fences, or line-based output.\n"
+                prompt += "Output raw JSON only.\n\n"
+                prompt += "Required JSON Schema:\n"
+                prompt += json.dumps(format_schema, indent=2)
+            else:
+                # Exploration phase - remind about eventual JSON output
+                prompt += "\n\n# Final Output Format Requirement\n"
+                prompt += "When you have completed your analysis and are ready to provide your final answer,\n"
+                prompt += "you MUST format your response as JSON conforming to this schema:\n"
+                prompt += json.dumps(format_schema, indent=2)
+                prompt += "\n\nDuring exploration, use tools normally. Only output JSON when providing your final answer."
+
         session_manager.add_system_message(session_id, prompt, location="system")
 
     def iteration_hook(context, _history):
@@ -541,12 +605,13 @@ def _execute_react_assistant(
 
     def step_hook(record: StepRecord, context) -> None:
         observation = record.observation
-        display_message = getattr(observation, "display_message", None)
-        if display_message:
-            click.echo(display_message)
-        elif observation.outcome:
-            tool_name = observation.tool or record.action.tool
-            click.echo(f"{tool_name}: {observation.outcome}")
+        if not silent_mode:
+            display_message = getattr(observation, "display_message", None)
+            if display_message:
+                click.echo(display_message)
+            elif observation.outcome:
+                tool_name = observation.tool or record.action.tool
+                click.echo(f"{tool_name}: {observation.outcome}")
 
         metrics_payload = observation.metrics if isinstance(observation.metrics, Mapping) else {}
         _update_files_discovered(files_discovered, metrics_payload if isinstance(metrics_payload, Dict) else {})
@@ -591,8 +656,23 @@ def _execute_react_assistant(
 
     final_message = action_provider.last_response_text()
     if final_message:
-        click.echo("")
-        click.echo(final_message)
+        # If format schema provided, extract and validate JSON
+        if format_schema:
+            extracted_json = _extract_json(final_message)
+            if extracted_json:
+                if not silent_mode:
+                    click.echo("")
+                click.echo(json.dumps(extracted_json, indent=2))
+            else:
+                # Fallback: output raw message if no valid JSON found
+                if not silent_mode:
+                    click.echo("")
+                    click.echo(final_message)
+                    click.echo("\n⚠️  Warning: Response does not contain valid JSON", err=True)
+        else:
+            if not silent_mode:
+                click.echo("")
+                click.echo(final_message)
 
     if budget_integration and budget_integration.cost_tracker:
         session = session_manager.get_session(session_id)
@@ -606,7 +686,7 @@ def _execute_react_assistant(
             "model_costs": budget_integration.cost_tracker.model_costs,
         }
 
-    if result.status != "success" and auto_summary_enabled:
+    if result.status != "success" and auto_summary_enabled and not silent_mode:
         conversation = session_manager.compose(session_id)
         fallback = auto_generate_summary(
             conversation,
@@ -617,7 +697,7 @@ def _execute_react_assistant(
             click.echo("")
             click.echo(fallback)
 
-    if should_emit_status:
+    if should_emit_status and not silent_mode:
         elapsed = time.time() - start_time
         status_icon = "✅" if execution_completed else "⚠️"
         message = result.stop_reason or ("Completed" if execution_completed else "Execution stopped")

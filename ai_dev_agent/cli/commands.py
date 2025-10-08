@@ -1,9 +1,10 @@
 """Command line interface for the development agent."""
 from __future__ import annotations
 
+import json
 from importlib import import_module
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
@@ -23,19 +24,63 @@ class NaturalLanguageGroup(click.Group):
 
     def resolve_command(self, ctx: click.Context, args: List[str]):  # type: ignore[override]
         planning_flag: Optional[bool] = None
+        system_value: Optional[str] = None
+        prompt_value: Optional[str] = None
+        format_value: Optional[str] = None
         filtered_args: List[str] = []
+        i = 0
 
-        for arg in args:
+        while i < len(args):
+            arg = args[i]
             if arg == "--plan":
                 planning_flag = True
+                i += 1
             elif arg == "--direct":
                 planning_flag = False
+                i += 1
+            elif arg == "--system" and i + 1 < len(args):
+                system_value = args[i + 1]
+                i += 2
+            elif arg == "--prompt" and i + 1 < len(args):
+                prompt_value = args[i + 1]
+                i += 2
+            elif arg == "--format" and i + 1 < len(args):
+                format_value = args[i + 1]
+                i += 2
             else:
                 filtered_args.append(arg)
+                i += 1
+
+        # Check if context already has global options set (from Click's parser)
+        # ctx.params is populated after group options are parsed
+        has_global_system = ctx.params.get('system') is not None if hasattr(ctx, 'params') else False
+        has_global_prompt = ctx.params.get('prompt_global') is not None if hasattr(ctx, 'params') else False
+        has_global_format = ctx.params.get('format_global') is not None if hasattr(ctx, 'params') else False
+
+        # If we captured any of the new custom options (system/prompt/format), auto-route to query
+        has_custom_opts = (system_value is not None or prompt_value is not None or
+                          format_value is not None or has_global_system or
+                          has_global_prompt or has_global_format)
+
+        # Store captured values in ctx.meta so they're available regardless of routing path
+        if planning_flag is not None:
+            ctx.meta["_use_planning"] = planning_flag
+        if system_value is not None:
+            ctx.meta["_system_extension"] = system_value
+        if prompt_value is not None:
+            ctx.meta["_prompt_value"] = prompt_value
+        if format_value is not None:
+            ctx.meta["_format_file"] = format_value
+
+        # If we have custom options but no command, auto-route to query
+        if has_custom_opts and not filtered_args:
+            ctx.meta["_emit_status_messages"] = True
+            return super().resolve_command(ctx, ["query"])
 
         try:
             return super().resolve_command(ctx, filtered_args)
         except click.UsageError:
+            # Original NL fallback logic for natural language queries
             if not filtered_args:
                 raise
             if any(arg.startswith("-") for arg in filtered_args):
@@ -45,17 +90,20 @@ class NaturalLanguageGroup(click.Group):
                 raise
             ctx.meta["_pending_nl_prompt"] = query
             ctx.meta["_emit_status_messages"] = True
-            if planning_flag is not None:
-                ctx.meta["_use_planning"] = planning_flag
             return super().resolve_command(ctx, ["query"])
 
 
-@click.group(cls=NaturalLanguageGroup)
+@click.group(cls=NaturalLanguageGroup, invoke_without_command=True)
 @click.option("--config", "config_path", type=click.Path(path_type=Path), help="Path to config file.")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging output.")
 @click.option("--plan", is_flag=True, help="Use planning mode for all queries")
+@click.option("--silent", is_flag=True, help="Suppress status messages and tool output (JSON-only mode)")
+@click.option("--system", help="System prompt extension (string or file path)")
+@click.option("--prompt", "prompt_global", help="User prompt from file or string")
+@click.option("--format", "format_global", help="Output format JSON schema file path")
 @click.pass_context
-def cli(ctx: click.Context, config_path: Path | None, verbose: bool, plan: bool) -> None:
+def cli(ctx: click.Context, config_path: Path | None, verbose: bool, plan: bool, silent: bool,
+        system: Optional[str], prompt_global: Optional[str], format_global: Optional[str]) -> None:
     """AI-assisted development agent CLI."""
     from ai_dev_agent.cli import load_settings as _load_settings
 
@@ -67,27 +115,80 @@ def cli(ctx: click.Context, config_path: Path | None, verbose: bool, plan: bool)
         LOGGER.warning("No API key configured. Some commands may fail.")
     ctx.obj = _build_context(settings)
     ctx.obj["default_use_planning"] = plan
+    ctx.obj["silent_mode"] = silent
+
+    # Store global options for use by query command
+    if system:
+        ctx.obj["_global_system"] = system
+    if prompt_global:
+        ctx.obj["_global_prompt"] = prompt_global
+    if format_global:
+        ctx.obj["_global_format"] = format_global
+
+    # If custom options provided but no subcommand, auto-invoke query
+    if ctx.invoked_subcommand is None and (system or prompt_global or format_global):
+        ctx.invoke(query)
 
 
 @cli.command(name="query")
 @click.argument("prompt", nargs=-1)
 @click.option("--plan", "force_plan", is_flag=True, help="Force planning for this query")
 @click.option("--direct", is_flag=True, help="Force direct execution (no planning)")
+@click.option("--system", help="System prompt extension (string or file path)")
+@click.option("--prompt", "prompt_file", help="User prompt from file or string")
+@click.option("--format", "format_file", help="Output format JSON schema file path")
 @click.pass_context
 def query(
     ctx: click.Context,
     prompt: Tuple[str, ...],
     force_plan: bool,
     direct: bool,
+    system: Optional[str],
+    prompt_file: Optional[str],
+    format_file: Optional[str],
 ) -> None:
     """Execute a natural-language query using the ReAct workflow."""
-    pending = " ".join(prompt).strip()
-    if not pending:
-        pending = str(ctx.meta.pop("_pending_nl_prompt", "")).strip()
-    if not pending:
-        pending = str(ctx.obj.pop("_pending_nl_prompt", "")).strip()
+    # Check for values from NaturalLanguageGroup fallback
+    meta_prompt = ctx.meta.pop("_prompt_value", None)
+    meta_system = ctx.meta.pop("_system_extension", None)
+    meta_format = ctx.meta.pop("_format_file", None)
+
+    # Resolve prompt: --prompt option > meta > global > CLI args > context
+    if prompt_file:
+        pending = _resolve_input(prompt_file)
+    elif meta_prompt:
+        pending = _resolve_input(meta_prompt)
+    elif ctx.obj.get("_global_prompt"):
+        pending = _resolve_input(ctx.obj["_global_prompt"])
+    else:
+        pending = " ".join(prompt).strip()
+        if not pending:
+            pending = str(ctx.meta.pop("_pending_nl_prompt", "")).strip()
+        if not pending:
+            pending = str(ctx.obj.pop("_pending_nl_prompt", "")).strip()
+
     if not pending:
         raise click.UsageError("Provide a request for the assistant.")
+
+    # Resolve system prompt extension (command option > meta > global)
+    if system:
+        system_extension = _resolve_input(system)
+    elif meta_system:
+        system_extension = _resolve_input(meta_system)
+    elif ctx.obj.get("_global_system"):
+        system_extension = _resolve_input(ctx.obj["_global_system"])
+    else:
+        system_extension = None
+
+    # Load format schema (command option > meta > global)
+    if format_file:
+        format_schema = _load_json_schema(format_file)
+    elif meta_format:
+        format_schema = _load_json_schema(meta_format)
+    elif ctx.obj.get("_global_format"):
+        format_schema = _load_json_schema(ctx.obj["_global_format"])
+    else:
+        format_schema = None
 
     _record_invocation(ctx, overrides={"prompt": pending, "mode": "query"})
 
@@ -120,7 +221,12 @@ def query(
         client = llm_factory(ctx)
     except click.ClickException as exc:
         raise click.ClickException(f'Failed to create LLM client: {exc}') from exc
-    _execute_react_assistant(ctx, client, settings, pending, use_planning=use_planning)
+    _execute_react_assistant(
+        ctx, client, settings, pending,
+        use_planning=use_planning,
+        system_extension=system_extension,
+        format_schema=format_schema
+    )
 
 
 @cli.command()
@@ -267,6 +373,36 @@ def diagnostics(
                         click.echo(f"  [{message.role}] {snippet}")
             else:
                 click.echo("\nHistory: <empty>")
+
+
+def _resolve_input(value: str) -> str:
+    """Resolve input: if path exists and is a file, read it; otherwise return as-is."""
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    if path.is_file():
+        try:
+            return path.read_text(encoding='utf-8')
+        except Exception as exc:
+            raise click.ClickException(f"Failed to read file '{value}': {exc}") from exc
+    return value
+
+
+def _load_json_schema(path: str) -> Optional[Dict[str, Any]]:
+    """Load and parse JSON schema from file."""
+    if not path:
+        return None
+    schema_path = Path(path).expanduser()
+    if not schema_path.is_absolute():
+        schema_path = Path.cwd() / schema_path
+    if not schema_path.is_file():
+        raise click.ClickException(f"Schema file not found: {path}")
+    try:
+        return json.loads(schema_path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Invalid JSON in schema file '{path}': {exc}") from exc
+    except Exception as exc:
+        raise click.ClickException(f"Failed to read schema file '{path}': {exc}") from exc
 
 
 def main() -> None:

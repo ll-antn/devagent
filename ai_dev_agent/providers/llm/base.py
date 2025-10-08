@@ -101,6 +101,7 @@ class LLMClient(Protocol):
         temperature: float = 0.2,
         max_tokens: int | None = None,
         extra_headers: Dict[str, str] | None = None,
+        response_format: Dict[str, Any] | None = None,
     ) -> str:
         """Complete a chat conversation."""
         ...
@@ -133,6 +134,7 @@ class LLMClient(Protocol):
         max_tokens: int | None = None,
         tool_choice: str | Dict[str, Any] | None = "auto",
         extra_headers: Dict[str, str] | None = None,
+        response_format: Dict[str, Any] | None = None,
     ) -> "ToolCallResult":
         """Run a chat completion with tool definitions and return parsed tool calls."""
         ...
@@ -289,8 +291,11 @@ class HTTPChatLLMClient(LLMClient, ABC):
         temperature: float = 0.2,
         max_tokens: int | None = None,
         extra_headers: Dict[str, str] | None = None,
+        response_format: Dict[str, Any] | None = None,
     ) -> str:
         payload = self._prepare_payload(messages, temperature, max_tokens)
+        if response_format:
+            payload["response_format"] = response_format
         data = self._post(payload, extra_headers=extra_headers)
         message = self._extract_choice_message(data, "chat response")
         content = message.get("content")
@@ -362,10 +367,13 @@ class HTTPChatLLMClient(LLMClient, ABC):
         max_tokens: int | None = None,
         tool_choice: str | Dict[str, Any] | None = "auto",
         extra_headers: Dict[str, str] | None = None,
+        response_format: Dict[str, Any] | None = None,
     ) -> ToolCallResult:
         payload = self._prepare_payload(messages, temperature, max_tokens)
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
+        if response_format:
+            payload["response_format"] = response_format
         data = self._post(payload, extra_headers=extra_headers)
         message = self._extract_choice_message(data, "tool call")
         tool_calls_raw = message.get("tool_calls") or []

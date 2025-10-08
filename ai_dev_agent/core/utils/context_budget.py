@@ -380,11 +380,14 @@ class BudgetedLLMClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         extra_headers: dict | None = None,
+        response_format: dict | None = None,
     ) -> str:
         prepared = self._prepare_messages(messages)
         kwargs = {"temperature": temperature, "max_tokens": max_tokens}
         if extra_headers is not None:
             kwargs["extra_headers"] = extra_headers
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         return self._inner.complete(prepared, **kwargs)
 
     def stream(
@@ -412,6 +415,7 @@ class BudgetedLLMClient:
         max_tokens: int | None = None,
         tool_choice: str | dict | None = "auto",
         extra_headers: dict | None = None,
+        response_format: dict | None = None,
     ) -> ToolCallResult:
         prepared = self._prepare_messages(messages)
         kwargs = {
@@ -421,6 +425,8 @@ class BudgetedLLMClient:
         }
         if extra_headers is not None:
             kwargs["extra_headers"] = extra_headers
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         return self._inner.invoke_tools(prepared, tools, **kwargs)
 
     def set_config(self, config: ContextBudgetConfig):

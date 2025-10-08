@@ -23,11 +23,13 @@ class LLMActionProvider:
         *,
         tools: Sequence[Dict[str, Any]] | None = None,
         budget_integration: Optional[BudgetIntegration] = None,
+        format_schema: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.client = llm_client
         self.session_manager = session_manager
         self.session_id = session_id
         self.budget_integration = budget_integration
+        self.format_schema = format_schema
         self._base_tools = list(tools or [])
         self._current_phase: str = "exploration"
         self._is_final_iteration: bool = False
@@ -46,19 +48,47 @@ class LLMActionProvider:
         conversation = self.session_manager.compose(self.session_id)
         tools = self._get_tools_for_phase(history)
 
-        if self.budget_integration:
-            result: ToolCallResult = self.budget_integration.execute_with_retry(
-                self.client.invoke_tools,
-                conversation,
-                tools=tools,
-                temperature=0.1,
-            )
+        # Build kwargs for LLM call
+        llm_kwargs = {
+            "temperature": 0.1,
+        }
+
+        # When format_schema present and this is final iteration, enforce JSON output
+        if self.format_schema and self._is_final_iteration:
+            # Only use json_object mode for object-rooted schemas
+            # DeepSeek API doesn't support json_schema type, and json_object only works with objects
+            schema_root_type = self.format_schema.get("type", "object")
+            if schema_root_type == "object":
+                llm_kwargs["response_format"] = {"type": "json_object"}
+            # For arrays or other types, rely on prompt-based guidance (no response_format)
+
+            # Call complete instead of invoke_tools for JSON-only mode
+            if self.budget_integration:
+                content = self.budget_integration.execute_with_retry(
+                    self.client.complete,
+                    conversation,
+                    **llm_kwargs,
+                )
+            else:
+                content = self.client.complete(
+                    conversation,
+                    **llm_kwargs,
+                )
+            # Wrap in ToolCallResult format for compatibility
+            result = ToolCallResult(calls=[], message_content=content)
         else:
-            result = self.client.invoke_tools(
-                conversation,
-                tools=tools,
-                temperature=0.1,
-            )
+            llm_kwargs["tools"] = tools
+            if self.budget_integration:
+                result: ToolCallResult = self.budget_integration.execute_with_retry(
+                    self.client.invoke_tools,
+                    conversation,
+                    **llm_kwargs,
+                )
+            else:
+                result = self.client.invoke_tools(
+                    conversation,
+                    **llm_kwargs,
+                )
 
         self._last_response = result
         normalized_tool_calls = self._normalize_tool_calls(result.raw_tool_calls, result.calls)
