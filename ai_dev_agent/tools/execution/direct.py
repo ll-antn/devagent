@@ -97,12 +97,17 @@ def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[s
 
     command = _build_command(cmd, args)
 
+    if args:
+        session_command = shlex.join([cmd, *args])
+    else:
+        session_command = cmd
+
     extra = context.extra or {}
     manager = extra.get("shell_session_manager") if isinstance(extra, dict) else None
     session_id = extra.get("shell_session_id") if isinstance(extra, dict) else None
 
     if isinstance(manager, ShellSessionManager) and isinstance(session_id, str):
-        command_str = " ".join(shlex.quote(part) for part in command)
+        command_str = session_command
         if cwd_value is not None:
             command_str = f"cd {shlex.quote(str(cwd))} && {command_str}"
         try:

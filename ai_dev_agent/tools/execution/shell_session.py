@@ -204,9 +204,14 @@ class ShellSession:
                     line = self._stderr.readline()
                     if line == "":
                         break
-                    if line.startswith(exit_marker):
+                    marker_index = line.find(exit_marker)
+                    if marker_index != -1:
+                        prefix = line[:marker_index]
+                        if prefix:
+                            stderr_chunks.append(prefix)
                         try:
-                            stderr_exit_holder["code"] = int(line[len(exit_marker) :].strip())
+                            remainder = line[marker_index + len(exit_marker) :]
+                            stderr_exit_holder["code"] = int(remainder.strip())
                         except ValueError:
                             stderr_exit_holder["code"] = None
                         break
@@ -232,9 +237,14 @@ class ShellSession:
                     if self._process.poll() is not None:
                         raise ShellSessionError("Shell session terminated unexpectedly.")
                     continue
-                if line.startswith(exit_marker):
+                marker_index = line.find(exit_marker)
+                if marker_index != -1:
+                    prefix = line[:marker_index]
+                    if prefix:
+                        stdout_chunks.append(prefix)
                     try:
-                        exit_code = int(line[len(exit_marker) :].strip())
+                        remainder = line[marker_index + len(exit_marker) :]
+                        exit_code = int(remainder.strip())
                     except ValueError:
                         exit_code = stderr_exit_holder.get("code") or 1
                     break

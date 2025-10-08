@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from ai_dev_agent.tools.code.code_edit.editor import CodeEditor
 from ai_dev_agent.engine.react.pipeline import PipelineCommands
 from ai_dev_agent.tools.execution.testing.local_tests import TestRunner
+from ai_dev_agent.tools.execution.shell_session import ShellSessionManager
 from ai_dev_agent.tools import ToolContext, registry, READ, WRITE, RUN
 from ai_dev_agent.core.utils.devagent_config import DevAgentConfig, load_devagent_yaml
 from ai_dev_agent.core.utils.logger import get_logger
@@ -39,6 +40,8 @@ class RegistryToolInvoker:
         collector: Optional[MetricsCollector] = None,
         pipeline_commands: Optional[PipelineCommands] = None,
         devagent_cfg: Optional[DevAgentConfig] = None,
+        shell_session_manager: Optional[ShellSessionManager] = None,
+        shell_session_id: Optional[str] = None,
     ) -> None:
         self.workspace = workspace
         self.settings = settings
@@ -48,6 +51,8 @@ class RegistryToolInvoker:
         self.collector = collector
         self.pipeline_commands = pipeline_commands
         self.devagent_cfg = devagent_cfg or load_devagent_yaml()
+        self.shell_session_manager = shell_session_manager
+        self.shell_session_id = shell_session_id
         self._structure_hints: Dict[str, Any] = {
             "symbols": set(),
             "files": {},
@@ -223,18 +228,24 @@ class RegistryToolInvoker:
     # ------------------------------------------------------------------
 
     def _invoke_registry(self, tool_name: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        extra: Dict[str, Any] = {
+            "code_editor": self.code_editor,
+            "test_runner": self.test_runner,
+            "pipeline_commands": self.pipeline_commands,
+            "structure_hints": self._export_structure_hints(),
+        }
+
+        if isinstance(self.shell_session_manager, ShellSessionManager) and isinstance(self.shell_session_id, str):
+            extra["shell_session_manager"] = self.shell_session_manager
+            extra["shell_session_id"] = self.shell_session_id
+
         ctx = ToolContext(
             repo_root=self.workspace,
             settings=self.settings,
             sandbox=self.sandbox,
             devagent_config=self.devagent_cfg,
             metrics_collector=self.collector,
-            extra={
-                "code_editor": self.code_editor,
-                "test_runner": self.test_runner,
-                "pipeline_commands": self.pipeline_commands,
-                "structure_hints": self._export_structure_hints(),
-            },
+            extra=extra,
         )
         return registry.invoke(tool_name, payload, ctx)
 
@@ -392,6 +403,8 @@ class SessionAwareToolInvoker(RegistryToolInvoker):
         *,
         session_manager: Optional[SessionManager] = None,
         session_id: Optional[str] = None,
+        shell_session_manager: Optional[ShellSessionManager] = None,
+        shell_session_id: Optional[str] = None,
     ) -> None:
         super().__init__(
             workspace=workspace,
@@ -402,6 +415,8 @@ class SessionAwareToolInvoker(RegistryToolInvoker):
             collector=collector,
             pipeline_commands=pipeline_commands,
             devagent_cfg=devagent_cfg,
+            shell_session_manager=shell_session_manager,
+            shell_session_id=shell_session_id,
         )
         self.session_manager = session_manager or (SessionManager.get_instance() if session_id else None)
         self.session_id = session_id
