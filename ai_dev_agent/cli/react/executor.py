@@ -611,6 +611,23 @@ def _execute_react_assistant(
         if system_extension:
             prompt += f"\n\n# Custom Instructions\n{system_extension}"
 
+        # Add patch analysis guidance when working with patch files
+        # Detect if user is analyzing a .patch file or if schema expects code review violations
+        is_patch_analysis = (
+            ".patch" in user_query.lower() or
+            (format_schema and "violation" in json.dumps(format_schema).lower())
+        )
+
+        if is_patch_analysis:
+            prompt += "\n\n# Patch Analysis Best Practice\n"
+            prompt += "When analyzing .patch files, use parse_patch tool to get complete patch data in ONE call.\n\n"
+            prompt += "Workflow:\n"
+            prompt += "1. Read rule to get 'Applies To' pattern (e.g., 'stdlib/.*\\.ets$')\n"
+            prompt += "2. result = parse_patch(path='file.patch', filter_pattern='...')\n"
+            prompt += "3. Iterate: for file in result['files']: for hunk in file['hunks']: for line in hunk['added_lines']\n"
+            prompt += "4. Check: line['content'] against rule, report with line['line_number']\n\n"
+            prompt += "The parse_patch result contains ALL lines with accurate numbers - don't re-extract with sed/grep.\n"
+
         # Add format schema instructions when present
         if format_schema:
             if is_final:

@@ -18,6 +18,7 @@ from ai_dev_agent.tools import (
     FIND,
     GREP,
     SYMBOLS,
+    PARSE_PATCH,
 )
 from ai_dev_agent.session import SessionManager, build_system_messages
 
@@ -77,6 +78,7 @@ class IntentRouter:
             FIND,             # Simple file finding
             GREP,             # Simple content search
             SYMBOLS,          # Simple symbol lookup
+            PARSE_PATCH,      # Structured patch parsing
             READ,
             RUN,
             WRITE,
