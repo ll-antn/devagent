@@ -2,19 +2,37 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ai_dev_agent.core.utils.constants import RUN_STDERR_TAIL_CHARS, RUN_STDOUT_TAIL_CHARS
+
 from ..registry import ToolContext, ToolSpec, registry
+from ..names import RUN
 from .shell_session import ShellSessionError, ShellSessionManager, ShellSessionTimeout
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "tools"
 
 
-_SHELL_CONTROL_TOKENS = {"|", "||", "&&"}
+_SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", ";;", "(", ")"}
+_SHELL_REDIRECTION_PATTERN = re.compile(r"^\d*(?:>>|>|<<|<<<|<|<>|>&|<&|&>|>\||\|&)")
+_ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=.*")
+_SUBSTITUTION_MARKERS: tuple[str, ...] = ("$(", "${", "`")
+
+
+def _summarize_output(output: str | None, limit: int) -> str:
+    """Return the trailing portion of ``output`` capped at ``limit`` with a truncation marker."""
+    if not output:
+        return ""
+    if len(output) <= limit:
+        return output
+    tail = output[-limit:]
+    omitted = len(output) - len(tail)
+    return f"{tail}\n\n[... truncated: {omitted} characters omitted ...]"
 
 
 def _wrap_with_shell(command: str) -> list[str]:
@@ -34,7 +52,15 @@ def _wrap_with_shell(command: str) -> list[str]:
 
 def _contains_shell_controls(tokens: Sequence[str]) -> bool:
     for token in tokens:
+        if not token:
+            continue
         if token in _SHELL_CONTROL_TOKENS:
+            return True
+        if _SHELL_REDIRECTION_PATTERN.match(token):
+            return True
+        if _ENV_ASSIGNMENT_PATTERN.match(token):
+            return True
+        if any(marker in token for marker in _SUBSTITUTION_MARKERS):
             return True
     return False
 
@@ -90,8 +116,8 @@ def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[s
         except ShellSessionError:
             raise
 
-        stdout_tail = result.stdout[-4000:] if result.stdout else ""
-        stderr_tail = result.stderr[-2000:] if result.stderr else ""
+        stdout_tail = _summarize_output(result.stdout, RUN_STDOUT_TAIL_CHARS)
+        stderr_tail = _summarize_output(result.stderr, RUN_STDERR_TAIL_CHARS)
 
         return {
             "exit_code": result.exit_code,
@@ -113,13 +139,13 @@ def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[s
     )
     duration_ms = int((time.perf_counter() - start) * 1000)
 
-    stdout_tail = process.stdout[-4000:] if process.stdout else ""
-    stderr_tail = process.stderr[-2000:] if process.stderr else ""
+    stdout_truncated = _summarize_output(process.stdout, RUN_STDOUT_TAIL_CHARS)
+    stderr_truncated = _summarize_output(process.stderr, RUN_STDERR_TAIL_CHARS)
 
     return {
         "exit_code": process.returncode,
-        "stdout_tail": stdout_tail,
-        "stderr_tail": stderr_tail,
+        "stdout_tail": stdout_truncated,
+        "stderr_tail": stderr_truncated,
         "log_path": None,
         "duration_ms": duration_ms,
     }
@@ -127,14 +153,15 @@ def _exec_command(payload: Mapping[str, Any], context: ToolContext) -> Mapping[s
 
 registry.register(
     ToolSpec(
-        name="exec",
+        name=RUN,
         handler=_exec_command,
-        request_schema_path=SCHEMA_DIR / "exec.request.json",
-        response_schema_path=SCHEMA_DIR / "exec.response.json",
+        request_schema_path=SCHEMA_DIR / "run.request.json",
+        response_schema_path=SCHEMA_DIR / "run.response.json",
         description=(
             "Execute a command directly. Provide 'cmd' (string) and optionally 'args' (list), "
             "'cwd' (string within the repo), and 'timeout_sec' (int)."
         ),
+        category="command",
     )
 )
 

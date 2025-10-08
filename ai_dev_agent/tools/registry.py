@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 from jsonschema import Draft7Validator
 
@@ -35,6 +35,8 @@ class ToolSpec:
     request_schema_path: Path
     response_schema_path: Path
     description: str = ""
+    display_name: Optional[str] = None
+    category: Optional[str] = None
 
 
 class ToolRegistry:
@@ -42,11 +44,15 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: Dict[str, ToolSpec] = {}
+        self._display_names: Dict[str, str] = {}
+        self._categories: Dict[str, str] = {}
+        self._category_members: Dict[str, set[str]] = {}
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._tools:
             LOGGER.debug("Overwriting existing tool registration for %s", spec.name)
         self._tools[spec.name] = spec
+        self._rebuild_indices()
 
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
@@ -70,6 +76,54 @@ class ToolRegistry:
             first_out = errors_out[0]
             raise ValueError(f"Tool {name} returned invalid response: {first_out.message}")
         return result
+
+    # Metadata helpers --------------------------------------------------
+
+    def canonical_name(self, name: Optional[str]) -> str:
+        if not name:
+            return "generic"
+        if name in self._tools:
+            return name
+        return name
+
+    def display_name(self, name: Optional[str]) -> str:
+        canonical = self.canonical_name(name)
+        return self._display_names.get(canonical, canonical)
+
+    def category(self, name: Optional[str]) -> str:
+        canonical = self.canonical_name(name)
+        return self._categories.get(canonical, "generic")
+
+    def aliases(self, name: Optional[str], *, include_canonical: bool = True) -> Tuple[str, ...]:
+        canonical = self.canonical_name(name)
+        if canonical not in self._tools:
+            return (canonical,) if include_canonical and canonical != "generic" else ()
+        return (canonical,) if include_canonical else ()
+
+    def aliases_by_category(self, category: str) -> Tuple[str, ...]:
+        members = self._category_members.get(category, set())
+        return tuple(sorted(members))
+
+    def tool_in_category(self, name: Optional[str], category: str) -> bool:
+        canonical = self.canonical_name(name)
+        return canonical in self._categories and self._categories[canonical] == category
+
+    # Internal -----------------------------------------------------------
+
+    def _rebuild_indices(self) -> None:
+        self._display_names.clear()
+        self._categories.clear()
+        self._category_members.clear()
+
+        for canonical, spec in self._tools.items():
+            display_name = spec.display_name or canonical
+            category = spec.category or "generic"
+
+            self._display_names[canonical] = display_name
+            self._categories[canonical] = category
+
+            members = self._category_members.setdefault(category, set())
+            members.add(canonical)
 
 
 @lru_cache(maxsize=64)

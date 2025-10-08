@@ -413,6 +413,7 @@ class HTTPChatLLMClient(LLMClient, ABC):
                     arguments = json.loads(raw_args)
                 except (TypeError, json.JSONDecodeError):
                     arguments = {}
+
             parsed.append(
                 ToolCall(
                     name=name,

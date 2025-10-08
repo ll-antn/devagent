@@ -118,10 +118,10 @@ class ContextPruningService:
 
             refreshed_messages = session.compose()
             final_messages = ensure_context_budget(refreshed_messages, self._budget)
-            sanitized = self._sanitize_tool_sequences(final_messages)
-            sanitized, redacted_count = self._redact_stale_tool_outputs(sanitized)
+            cleaned = self._remove_orphaned_tool_messages(final_messages)
+            cleaned, redacted_count = self._redact_stale_tool_outputs(cleaned)
             metadata["redacted_tool_messages"] = redacted_count
-            session.history = [msg for msg in sanitized if msg.role != "system"]
+            session.history = [msg for msg in cleaned if msg.role != "system"]
 
             final_estimate = estimate_tokens(session.compose())
             summary_text = next(
@@ -220,7 +220,7 @@ class ContextPruningService:
         content = message.content or ""
         return content.startswith(SUMMARY_PREFIX)
 
-    def _sanitize_tool_sequences(self, messages: Sequence[Message]) -> List[Message]:
+    def _remove_orphaned_tool_messages(self, messages: Sequence[Message]) -> List[Message]:
         """Drop tool responses whose initiating assistant turn was pruned."""
 
         result: List[Message] = []

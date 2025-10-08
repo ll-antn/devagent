@@ -63,6 +63,23 @@ class Observation(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class CLIObservation(Observation):
+    """Extended observation carrying UI-friendly metadata for the CLI."""
+
+    formatted_output: Optional[str] = Field(
+        default=None,
+        description="Pre-formatted summary for immediate CLI display.",
+    )
+    artifact_path: Optional[str] = Field(
+        default=None,
+        description="Path to the full output artifact, if materialized.",
+    )
+    display_message: Optional[str] = Field(
+        default=None,
+        description="High-level message to show to the user.",
+    )
+
+
 class MetricsSnapshot(BaseModel):
     """Normalized metrics captured after each step."""
 

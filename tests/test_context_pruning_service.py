@@ -120,7 +120,7 @@ def test_orphan_tool_message_removed() -> None:
     )
     orphan_messages = [Message(role="tool", content="data", tool_call_id="missing")]
 
-    sanitized = service._sanitize_tool_sequences(orphan_messages)
+    sanitized = service._remove_orphaned_tool_messages(orphan_messages)
     assert not sanitized
 
 

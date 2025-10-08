@@ -3,6 +3,7 @@ import pytest
 from ai_dev_agent.cli.router import IntentDecision, IntentRouter, IntentRoutingError
 from ai_dev_agent.providers.llm.base import ToolCall, ToolCallResult
 from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.tools import RUN
 
 
 class DummyClient:
@@ -21,7 +22,7 @@ def test_intent_router_returns_tool_decision(tmp_path):
     settings = Settings()
     settings.workspace_root = tmp_path
     result = ToolCallResult(
-        calls=[ToolCall(name="exec", arguments={"cmd": "ls"})],
+        calls=[ToolCall(name=RUN, arguments={"cmd": "ls"})],
         message_content="Enumerating workspace",
     )
     client = DummyClient(result)
@@ -30,7 +31,7 @@ def test_intent_router_returns_tool_decision(tmp_path):
     decision = router.route("покажи содержимое директории")
 
     assert isinstance(decision, IntentDecision)
-    assert decision.tool == "exec"
+    assert decision.tool == RUN
     assert decision.arguments["cmd"] == "ls"
     assert decision.rationale == "Enumerating workspace"
     assert client.captured_messages is not None

@@ -18,6 +18,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ai_dev_agent.core.utils.config import load_settings
+from ai_dev_agent.tools import READ, WRITE, RUN, FIND, GREP, SYMBOLS
 from benchmarks.test_cases import TestCase
 
 
@@ -152,15 +153,14 @@ class BenchmarkRunner:
         return 0
 
     def _extract_tools_used(self, output: str) -> int:
-        """Extract number of tools used from output.
+        f"""Extract number of tools used from output.
 
         Based on DevAgent's tool categories and status indicators:
-        - ⚡ = command execution (exec, sandbox.exec)
-        - 🔍 = search operations (code.search)
-        - 📖 = file reading (fs.read)
-        - 📝 = file writing/patching (fs.write_patch)
-        - 🧠 = AST operations (ast.query)
-        - 🔣 = symbol operations (symbols.find, symbols.index)
+        - ⚡ = command execution ({RUN}, sandbox.exec)
+        - 🔍 = search operations ({FIND}/{GREP})
+        - 📖 = file reading ({READ})
+        - 📝 = file writing/patching ({WRITE})
+        - 🔣 = symbol operations ({SYMBOLS})
         - 📁 = directory listing
         - ❌ = failed tool (still counts as tool usage)
         """
@@ -170,23 +170,19 @@ class BenchmarkRunner:
         # Each tool invocation format: "emoji tool_name "argument" → result"
 
         # Command execution (⚡ exec, ⚡ sandbox.exec)
-        tools += len(re.findall(r'⚡\s+exec\s+"', output))
+        tools += len(re.findall(r'⚡\s+run\s+"', output))
         tools += len(re.findall(r'⚡\s+sandbox\.exec\s+"', output))
 
-        # Search operations (🔍 code.search "query")
+        # Search operations (🔍 find/grep "query")
         tools += len(re.findall(r'🔍\s+code\.search\s+"', output))
 
-        # File reading (📖 fs.read "path" or 📖 read "path")
-        # Use non-capturing group to match either variant without duplicating
-        tools += len(re.findall(r'📖\s+(?:fs\.)?read\s+"', output))
+        # File reading (📖 read "path")
+        tools += len(re.findall(r'📖\s+read\s+"', output))
 
-        # File writing/patching (📝 fs.write_patch or 📝 write)
-        tools += len(re.findall(r'📝\s+(?:fs\.)?write', output))
+        # File writing/patching (📝 write)
+        tools += len(re.findall(r'📝\s+write', output))
 
-        # AST operations (🧠 ast.query or 🧠 ast)
-        tools += len(re.findall(r'🧠\s+ast(?:\.query)?\s+', output))
-
-        # Symbol operations (🔣 symbols.find, symbols.index)
+        # Symbol operations (🔣 symbols)
         tools += len(re.findall(r'🔣\s+symbols\.(?:find|index)\s+', output))
 
         # Directory/file listing (📁 list or 📁 ls)
@@ -194,7 +190,7 @@ class BenchmarkRunner:
 
         # Failed tools (❌ tool_name "arg")
         # Only count if followed by a tool name pattern and quote
-        failed_tools = re.findall(r'❌\s+(?:exec|code\.search|(?:fs\.)?(?:read|write)|ast\.query|symbols\.(?:find|index))\s+"', output)
+        failed_tools = re.findall(r'❌\s+(?:exec|code\.search|(?:fs\.)?(?:read|write)|symbols\.(?:find|index))\s+"', output)
         tools += len(failed_tools)
 
         # Fallback: if no tools found but task completed, check completion message

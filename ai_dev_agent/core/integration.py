@@ -44,19 +44,6 @@ try:
 except ImportError:
     AdaptiveBudgetManager = None
 
-try:
-    from ai_dev_agent.core.metrics.tool_tracker import ToolTracker
-except ImportError:
-    ToolTracker = None
-
-try:
-    from ai_dev_agent.core.agents.specialized_agents import SpecializedAgentManager, AgentMode, Permission
-except ImportError:
-    SpecializedAgentManager = None
-    AgentMode = None
-    Permission = None
-
-
 @dataclass
 class EnhancedComponents:
     """Container for all enhanced components."""
@@ -64,8 +51,6 @@ class EnhancedComponents:
     summarizer: Optional[EnhancedSummarizer] = None
     repo_map: Optional[RepoMap] = None
     budget_manager: Optional[AdaptiveBudgetManager] = None
-    tool_tracker: Optional[ToolTracker] = None
-    agent_manager: Optional[SpecializedAgentManager] = None
     prompt_context: Optional[PromptContext] = None
 
 
@@ -157,45 +142,6 @@ class ComponentIntegration:
         except Exception:
             return None
 
-    def initialize_tool_tracker(self) -> Optional[ToolTracker]:
-        """Initialize tool usage tracker."""
-
-        if not self.enable_all or ToolTracker is None:
-            return None
-
-        try:
-            self.components.tool_tracker = ToolTracker(
-                project_root=self.project_root,
-                persist_metrics=True
-            )
-            return self.components.tool_tracker
-        except Exception:
-            return None
-
-    def initialize_agent_manager(
-        self,
-        mode: Optional[str] = None
-    ) -> Optional[SpecializedAgentManager]:
-        """Initialize specialized agent manager."""
-
-        if not self.enable_all or SpecializedAgentManager is None:
-            return None
-
-        try:
-            self.components.agent_manager = SpecializedAgentManager()
-
-            # Set initial mode if provided
-            if mode and AgentMode:
-                try:
-                    agent_mode = AgentMode[mode.upper()]
-                    self.components.agent_manager.set_agent_mode(agent_mode)
-                except (KeyError, AttributeError):
-                    pass
-
-            return self.components.agent_manager
-        except Exception:
-            return None
-
     def get_system_prompt(
         self,
         provider: str,
@@ -243,50 +189,7 @@ class ComponentIntegration:
         arguments: Optional[Dict] = None
     ) -> Tuple[bool, Optional[str]]:
         """Check if tool usage is permitted."""
-
-        if not self.components.agent_manager:
-            return True, None
-
-        permission, reason = self.components.agent_manager.check_tool_permission(
-            tool_name,
-            arguments
-        )
-
-        if Permission and permission == Permission.ALLOW:
-            return True, None
-        elif Permission and permission == Permission.DENY:
-            return False, reason
-        elif Permission and permission == Permission.ASK:
-            # ASK requires user confirmation - block execution with informative message
-            return False, f"User confirmation required for {tool_name}"
-        else:
-            # Unknown permission state - default to allow for backward compatibility
-            return True, None
-
-    def record_tool_execution(
-        self,
-        tool_name: str,
-        duration: float,
-        success: bool,
-        error_message: Optional[str] = None,
-        output_size: int = 0,
-        iteration: Optional[int] = None,
-        phase: Optional[str] = None
-    ) -> None:
-        """Record tool execution metrics."""
-
-        if not self.components.tool_tracker:
-            return
-
-        self.components.tool_tracker.record_execution(
-            tool_name=tool_name,
-            duration=duration,
-            success=success,
-            error_message=error_message,
-            output_size=output_size,
-            iteration=iteration,
-            phase=phase
-        )
+        return True, None
 
     def get_ranked_files(
         self,
@@ -305,19 +208,8 @@ class ComponentIntegration:
             max_files
         )
 
-    def should_skip_tool(self, tool_name: str) -> bool:
-        """Check if tool should be skipped due to failures."""
-
-        if not self.components.tool_tracker:
-            return False
-
-        return self.components.tool_tracker.should_skip_tool(tool_name)
-
     def save_state(self) -> None:
         """Save state of all components."""
-
-        if self.components.tool_tracker:
-            self.components.tool_tracker.save_metrics()
 
         # RepoMap saves automatically via cache
 
@@ -328,12 +220,6 @@ class ComponentIntegration:
 
         if self.components.budget_manager:
             stats['budget'] = self.components.budget_manager.get_stats()
-
-        if self.components.tool_tracker:
-            stats['tools'] = self.components.tool_tracker.get_efficiency_report()
-
-        if self.components.agent_manager:
-            stats['agent'] = self.components.agent_manager.get_agent_summary()
 
         return stats
 

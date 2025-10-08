@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
 from ..registry import ToolSpec, ToolContext, registry
+from ..names import READ, WRITE
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas" / "tools"
 
@@ -27,7 +28,7 @@ def _fs_read(payload: Mapping[str, Any], context: ToolContext) -> Mapping[str, A
     for rel in payload["paths"]:
         target = _resolve_path(repo_root, rel)
         if not target.exists() or not target.is_file():
-            raise FileNotFoundError(rel)
+            raise ValueError(f"File '{rel}' not found in workspace")
         text = target.read_text(encoding="utf-8", errors="replace")
         original_text = text
 
@@ -126,30 +127,32 @@ def _fs_write_patch(payload: Mapping[str, Any], context: ToolContext) -> Mapping
 
 registry.register(
     ToolSpec(
-        name="fs.read",
+        name=READ,
         handler=_fs_read,
-        request_schema_path=SCHEMA_DIR / "fs.read.request.json",
-        response_schema_path=SCHEMA_DIR / "fs.read.response.json",
+        request_schema_path=SCHEMA_DIR / "read.request.json",
+        response_schema_path=SCHEMA_DIR / "read.response.json",
         description=(
             "Read file contents from the repository. Provide 'paths' (list of file paths) to read. "
             "Optional parameters: 'context_lines' (int) to limit output, or 'byte_range' ([start, end]) "
-            "for large files. Returns contents with line numbers. Use this AFTER code.search to examine "
+            "for large files. Returns contents with line numbers. Use this after find/grep to examine "
             "specific files you've located."
         ),
+        category="file_read",
     )
 )
 
 registry.register(
     ToolSpec(
-        name="fs.write_patch",
+        name=WRITE,
         handler=_fs_write_patch,
-        request_schema_path=SCHEMA_DIR / "fs.write_patch.request.json",
-        response_schema_path=SCHEMA_DIR / "fs.write_patch.response.json",
+        request_schema_path=SCHEMA_DIR / "write.request.json",
+        response_schema_path=SCHEMA_DIR / "write.response.json",
         description=(
             "Apply a unified diff patch to modify existing files. Requires 'diff' (string in unified diff format). "
             "Preferred over rewriting entire files as it shows precise changes and is safer. Automatically validates "
             "patch format and applies changes atomically. Use this for surgical code modifications."
         ),
+        category="command",
     )
 )
 

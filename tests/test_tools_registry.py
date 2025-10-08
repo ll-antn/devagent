@@ -1,14 +1,15 @@
 """Tests for registry-backed tools."""
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from ai_dev_agent.tools import ToolContext, registry as tool_registry  # noqa: F401
+from ai_dev_agent.core.utils.constants import RUN_STDOUT_TAIL_CHARS
+from ai_dev_agent.tools import ToolContext, registry as tool_registry, READ, WRITE, RUN  # noqa: F401
 from ai_dev_agent.core.utils.config import Settings
 
 
@@ -30,7 +31,7 @@ def _make_context(root: Path, sandbox=None) -> ToolContext:
     )
 
 
-def test_fs_read_and_write(tmp_path: Path) -> None:
+def test_read_and_write(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
     target = tmp_path / "hello.py"
     target.write_text("print('hello')\n", encoding="utf-8")
@@ -39,7 +40,7 @@ def test_fs_read_and_write(tmp_path: Path) -> None:
 
     ctx = _make_context(tmp_path)
 
-    read_result = tool_registry.invoke("fs.read", {"paths": ["hello.py"]}, ctx)
+    read_result = tool_registry.invoke(READ, {"paths": ["hello.py"]}, ctx)
     assert read_result["files"][0]["content"].startswith("print"), read_result
 
     diff = """diff --git a/hello.py b/hello.py
@@ -49,23 +50,51 @@ def test_fs_read_and_write(tmp_path: Path) -> None:
 -print('hello')
 +print('world')
 """
-    apply_result = tool_registry.invoke("fs.write_patch", {"diff": diff}, ctx)
+    apply_result = tool_registry.invoke(WRITE, {"diff": diff}, ctx)
     assert apply_result["applied"] is True
     assert apply_result["diff_stats"]["lines"] == 2
     assert (tmp_path / "hello.py").read_text(encoding="utf-8").strip() == "print('world')"
 
 
-def test_code_search(tmp_path: Path) -> None:
+def test_read_missing_file_returns_value_error(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
-    module = tmp_path / "module.py"
-    module.write_text("def react_loop():\n    return 'ok'\n", encoding="utf-8")
-    subprocess.run(["git", "add", "module.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add module"], cwd=tmp_path, check=True)
+    ctx = _make_context(tmp_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        tool_registry.invoke(READ, {"paths": ["missing.txt"]}, ctx)
+
+    assert "missing.txt" in str(exc_info.value)
+
+
+def test_find_returns_matching_files(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    (tmp_path / "a.py").write_text("print('a')\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.py", "b.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add files"], cwd=tmp_path, check=True)
 
     ctx = _make_context(tmp_path)
-    result = tool_registry.invoke("code.search", {"query": "react_loop"}, ctx)
-    assert result["matches"], "expected at least one match"
-    assert result["matches"][0]["path"].endswith("module.py")
+    result = tool_registry.invoke("find", {"query": "*.py"}, ctx)
+    files = {Path(entry["path"]).name for entry in result.get("files", [])}
+    assert "a.py" in files
+    assert "b.txt" not in files
+
+
+def test_grep_returns_grouped_matches(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    target = tmp_path / "notes.md"
+    target.write_text("hello\nhello world\n", encoding="utf-8")
+    subprocess.run(["git", "add", "notes.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add notes"], cwd=tmp_path, check=True)
+
+    ctx = _make_context(tmp_path)
+    result = tool_registry.invoke("grep", {"pattern": "hello"}, ctx)
+    matches = result.get("matches") or []
+    assert matches, result
+    first = matches[0]
+    assert first.get("file", "").endswith("notes.md")
+    lines = [m.get("line") for m in first.get("matches", [])]
+    assert lines == [1, 2]
 
 
 def _has_universal_ctags() -> bool:
@@ -77,7 +106,7 @@ def _has_universal_ctags() -> bool:
 
 
 @pytest.mark.skipif(not _has_universal_ctags(), reason="Universal Ctags not available")
-def test_symbols_index_and_find(tmp_path: Path) -> None:
+def test_symbols_returns_results(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
     target = tmp_path / "lib.py"
     target.write_text("""def sample():\n    return 1\n""", encoding="utf-8")
@@ -85,58 +114,16 @@ def test_symbols_index_and_find(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "add lib"], cwd=tmp_path, check=True)
 
     ctx = _make_context(tmp_path)
-    idx_result = tool_registry.invoke("symbols.index", {}, ctx)
-    assert idx_result["stats"]["symbols"] >= 1
-
-    find_result = tool_registry.invoke("symbols.find", {"name": "sample"}, ctx)
-    assert any(match["path"].endswith("lib.py") for match in find_result["defs"])
-
-
-def test_ast_query(tmp_path: Path) -> None:
-    _init_git_repo(tmp_path)
-    path = tmp_path / "sample.py"
-    path.write_text("""def alpha():\n    pass\n""", encoding="utf-8")
-    subprocess.run(["git", "add", "sample.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add sample"], cwd=tmp_path, check=True)
-
-    ctx = _make_context(tmp_path)
-    query = "(function_definition name: (identifier) @id)"
-    result = tool_registry.invoke("ast.query", {"path": "sample.py", "query": query}, ctx)
-    assert result["nodes"], "Expected AST nodes from query"
-
-
-def test_ast_summary_mode(tmp_path: Path) -> None:
-    pytest.importorskip("tree_sitter_languages")
-    _init_git_repo(tmp_path)
-    path = tmp_path / "sample.py"
-    path.write_text(
-        """
-class Alpha:
-    def beta(self):
-        pass
-
-
-def gamma():
-    return 42
-""".strip(),
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "add", "sample.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add sample"], cwd=tmp_path, check=True)
-
-    ctx = _make_context(tmp_path)
-    result = tool_registry.invoke("ast.query", {"path": "sample.py", "mode": "summary"}, ctx)
-    assert result["mode"] == "summary"
-    summaries = result.get("summaries") or []
-    assert summaries, "Expected structural summaries"
-    assert summaries[0]["path"].endswith("sample.py")
-    outline = summaries[0]["outline"]
-    assert any("class Alpha" in line for line in outline)
+    result = tool_registry.invoke("symbols", {"name": "sample"}, ctx)
+    symbols = result.get("symbols") or []
+    assert symbols, result
+    names = {entry.get("name") for entry in symbols}
+    assert any(name and name.lower().startswith("sample") for name in names)
 
 
 def test_exec_tool(tmp_path: Path) -> None:
     ctx = _make_context(tmp_path)
-    result = tool_registry.invoke("exec", {"cmd": "echo", "args": ["hello"]}, ctx)
+    result = tool_registry.invoke(RUN, {"cmd": "echo", "args": ["hello"]}, ctx)
     assert result["exit_code"] == 0
     assert "hello" in result["stdout_tail"]
 
@@ -147,23 +134,36 @@ def test_exec_tool_handles_pipes(tmp_path: Path) -> None:
     (tmp_path / "two.txt").write_text("b", encoding="utf-8")
 
     command = "find . -maxdepth 1 -type f -print | wc -l"
-    result = tool_registry.invoke("exec", {"cmd": command}, ctx)
+    result = tool_registry.invoke(RUN, {"cmd": command}, ctx)
 
     assert result["exit_code"] == 0
     assert result["stdout_tail"].strip() == "2"
 
 
-def test_security_secrets_scan(tmp_path: Path) -> None:
-    _init_git_repo(tmp_path)
-    secret_file = tmp_path / "config.txt"
-    secret_file.write_text("api_key=AKIA1234567890ABCDEF\n", encoding="utf-8")
-    subprocess.run(["git", "add", "config.txt"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add config"], cwd=tmp_path, check=True)
-
+def test_exec_tool_handles_redirection(tmp_path: Path) -> None:
     ctx = _make_context(tmp_path)
-    result = tool_registry.invoke("security.secrets_scan", {"paths": ["config.txt"]}, ctx)
-    assert result["findings"] >= 1
-    report = tmp_path / result["report_path"]
-    assert report.is_file()
-    data = json.loads(report.read_text(encoding="utf-8"))
-    assert data["findings"], "Report should contain findings"
+    target = tmp_path / "redirected.txt"
+
+    result = tool_registry.invoke(RUN, {"cmd": 'echo "hello" >> redirected.txt'}, ctx)
+
+    assert result["exit_code"] == 0
+    assert target.exists()
+    assert target.read_text(encoding="utf-8").strip() == "hello"
+
+
+def test_exec_tool_truncates_with_marker(tmp_path: Path) -> None:
+    ctx = _make_context(tmp_path)
+    oversize = "x" * (RUN_STDOUT_TAIL_CHARS + 250)
+    result = tool_registry.invoke(
+        RUN,
+        {
+            "cmd": sys.executable,
+            "args": ["-c", f"print('{oversize}')"],
+        },
+        ctx,
+    )
+
+    stdout_tail = result["stdout_tail"]
+    assert "... truncated:" in stdout_tail
+    assert "characters omitted" in stdout_tail
+    assert stdout_tail.rstrip().endswith("characters omitted ...]")

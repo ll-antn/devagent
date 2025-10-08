@@ -26,9 +26,12 @@ class ReactiveExecutor:
 
     def __init__(
         self,
-        evaluator: GateEvaluator,
+        evaluator: Optional[GateEvaluator] = None,
+        *,
+        default_max_steps: int = 25,
     ) -> None:
         self.evaluator = evaluator
+        self.default_max_steps = max(1, int(default_max_steps or 1))
 
     def run(
         self,
@@ -37,18 +40,22 @@ class ReactiveExecutor:
         tool_invoker: ToolInvoker,
         *,
         prior_steps: Optional[Iterable[StepRecord]] = None,
+        max_steps: Optional[int] = None,
     ) -> RunResult:
         start_time = time.perf_counter()
         history: List[StepRecord] = list(prior_steps or [])
         steps: List[StepRecord] = []
         last_eval: Optional[EvaluationResult] = None
         exc_info: Optional[Exception] = None
+        stop_condition: Optional[str] = None
+        steps_budget = self._resolve_steps_budget(max_steps)
         try:
             step_index = len(history) + 1
-            while step_index <= self.evaluator.config.steps_budget:
+            while step_index <= steps_budget:
                 try:
                     action_payload = action_provider(task, history + steps)
                 except StopIteration:
+                    stop_condition = "stop_iteration"
                     break
                 try:
                     action = self._ensure_action(action_payload, step_index)
@@ -57,7 +64,18 @@ class ReactiveExecutor:
 
                 observation = self._invoke_tool(tool_invoker, action)
                 metrics = self._metrics_from_observation(observation)
-                evaluation = self.evaluator.evaluate(metrics, history + steps)
+                if self.evaluator:
+                    evaluation = self.evaluator.evaluate(metrics, history + steps)
+                else:
+                    evaluation = EvaluationResult(
+                        gates={},
+                        required_gates={},
+                        should_stop=False,
+                        stop_reason=None,
+                        next_action_hint=None,
+                        improved_metrics={},
+                        status="in_progress",
+                    )
                 record = StepRecord(
                     action=action,
                     observation=observation,
@@ -68,29 +86,36 @@ class ReactiveExecutor:
                 steps.append(record)
                 last_eval = evaluation
 
-                if evaluation.should_stop:
+                if self.evaluator and evaluation.should_stop:
+                    stop_condition = "gates"
                     break
                 step_index += 1
+            else:
+                stop_condition = "budget"
 
         except Exception as exc:  # noqa: BLE001 - propagate after trace finalization
             exc_info = exc
             if not last_eval:
                 last_eval = EvaluationResult(
                     gates={},
+                    required_gates={},
                     should_stop=True,
                     stop_reason=f"Exception: {exc}",
                     next_action_hint=None,
                     improved_metrics={},
                     status="failed",
                 )
+            stop_condition = "exception"
         finally:
             runtime = time.perf_counter() - start_time
             gates = last_eval.gates if last_eval else {}
-            status = last_eval.status if last_eval else "failed"
-            stop_reason = last_eval.stop_reason if last_eval else None
-            if last_eval and not last_eval.should_stop and status == "in_progress":
-                status = "failed"
-                stop_reason = stop_reason or "Execution stopped before gates were satisfied."
+            required_gates = last_eval.required_gates if last_eval else {}
+            status, stop_reason = self._derive_status(
+                stop_condition,
+                last_eval,
+                bool(self.evaluator),
+                steps,
+            )
             metrics_dict = steps[-1].metrics.model_dump() if steps else {}
 
             result = RunResult(
@@ -98,7 +123,7 @@ class ReactiveExecutor:
                 status=status,
                 steps=history + steps,
                 gates=gates,
-                required_gates=(last_eval.required_gates if last_eval else {}),
+                required_gates=required_gates,
                 stop_reason=stop_reason,
                 runtime_seconds=round(runtime, 3),
                 metrics=metrics_dict,
@@ -146,6 +171,71 @@ class ReactiveExecutor:
         if not isinstance(metrics, dict):
             raise TypeError(f"Observation metrics must be dict-like, received {type(metrics)!r}")
         return MetricsSnapshot.model_validate(metrics)
+
+    def _resolve_steps_budget(self, max_steps: Optional[int]) -> int:
+        if self.evaluator:
+            budget = self.evaluator.config.steps_budget
+            if max_steps is not None:
+                try:
+                    override = int(max_steps)
+                except (TypeError, ValueError):
+                    override = budget
+                else:
+                    override = max(1, override)
+                budget = min(budget, override)
+            return max(1, budget)
+
+        if max_steps is not None:
+            try:
+                parsed = int(max_steps)
+            except (TypeError, ValueError):
+                parsed = self.default_max_steps
+            else:
+                if parsed <= 0:
+                    parsed = self.default_max_steps
+            return max(1, parsed)
+        return self.default_max_steps
+
+    def _derive_status(
+        self,
+        stop_condition: Optional[str],
+        evaluation: Optional[EvaluationResult],
+        has_evaluator: bool,
+        steps: Sequence[StepRecord],
+    ) -> tuple[str, Optional[str]]:
+        condition = stop_condition or "unknown"
+        if has_evaluator:
+            if evaluation:
+                status = evaluation.status
+                stop_reason = evaluation.stop_reason
+                if not evaluation.should_stop and status == "in_progress":
+                    status = "failed"
+                    stop_reason = stop_reason or "Execution stopped before gates were satisfied."
+                return status, stop_reason
+            if condition == "stop_iteration":
+                return "success", "Action provider requested stop."
+            if condition == "budget":
+                return "failed", "Step budget exhausted."
+            if condition == "exception":
+                return "failed", "Exception raised during execution."
+            return "failed", "Execution ended without evaluation."
+
+        if condition == "stop_iteration":
+            return "success", "Completed"
+        if condition == "budget":
+            if steps:
+                return "failed", "Step budget exhausted."
+            return "failed", "No actions were executed before the step budget was reached."
+        if condition == "exception":
+            stop_reason = evaluation.stop_reason if evaluation else "Exception raised during execution."
+            return "failed", stop_reason
+        if condition == "gates":
+            stop_reason = evaluation.stop_reason if evaluation else "Completed"
+            return "success", stop_reason
+
+        stop_reason = evaluation.stop_reason if evaluation else None
+        status = "success" if steps else "failed"
+        return status, stop_reason
 
 
 __all__ = ["ReactiveExecutor", "ActionProvider", "ToolInvoker"]

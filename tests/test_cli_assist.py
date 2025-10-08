@@ -15,6 +15,7 @@ from ai_dev_agent.cli import cli
 from ai_dev_agent.cli.router import IntentDecision
 from ai_dev_agent.providers.llm.base import ToolCall, ToolCallResult
 from ai_dev_agent.core.utils.config import Settings
+from ai_dev_agent.tools import FIND, WRITE, RUN
 
 
 Predicate = Callable[[str], bool]
@@ -110,18 +111,17 @@ def assist_harness(tmp_path: Path, monkeypatch) -> AssistHarness:
     return AssistHarness(repo_root=repo_root, runner=runner, _rules=router_rules, _client_ref=client_ref)
 
 
-def test_assist_code_search_returns_expected_matches(assist_harness: AssistHarness) -> None:
+def test_assist_find_returns_expected_matches(assist_harness: AssistHarness) -> None:
     assist_harness.configure_router(
         (
             lambda prompt: "find greet" in prompt.lower(),
-            IntentDecision(tool="code.search", arguments={"query": "def greet"}),
+            IntentDecision(tool=FIND, arguments={"query": "*.py"}),
         ),
     )
 
     result, duration = assist_harness.invoke("Find greet function definition")
 
     assert "examples/python_app.py" in result.output
-    assert "def greet" in result.output
     assert 0.0 < duration < 2.0
 
 
@@ -147,7 +147,7 @@ def test_assist_can_patch_existing_file(assist_harness: AssistHarness) -> None:
     assist_harness.configure_router(
         (
             lambda prompt: "update greet" in prompt.lower(),
-            IntentDecision(tool="fs.write_patch", arguments={"diff": diff_text}),
+            IntentDecision(tool=WRITE, arguments={"diff": diff_text}),
         ),
     )
 
@@ -177,7 +177,7 @@ def test_assist_can_create_and_run_script(assist_harness: AssistHarness) -> None
     assist_harness.configure_router(
         (
             lambda prompt: "create hello script" in prompt.lower(),
-            IntentDecision(tool="fs.write_patch", arguments={"diff": diff_text}),
+            IntentDecision(tool=WRITE, arguments={"diff": diff_text}),
         ),
     )
 
@@ -192,7 +192,7 @@ def test_assist_can_create_and_run_script(assist_harness: AssistHarness) -> None
     assist_harness.configure_router(
         (
             lambda prompt: "run hello script" in prompt.lower(),
-            IntentDecision(tool="exec", arguments={"cmd": "bash", "args": ["scripts/hello.sh"]}),
+            IntentDecision(tool=RUN, arguments={"cmd": "bash", "args": ["scripts/hello.sh"]}),
         ),
     )
 
@@ -230,14 +230,14 @@ def test_assist_react_flow_executes_tool_sequence(assist_harness: AssistHarness)
             self.invocations.append(transcript)
             if len(self.invocations) == 1:
                 return ToolCallResult(
-                    calls=[ToolCall(name="code_search", arguments={"query": "def greet"}, call_id="call_1")],
+                    calls=[ToolCall(name="find", arguments={"query": "*.py"}, call_id="call_1")],
                     message_content=None,
                     raw_tool_calls=[
                         {
                             "id": "call_1",
                             "function": {
-                                "name": "code_search",
-                                "arguments": '{"query": "def greet"}',
+                                "name": "find",
+                                "arguments": '{"query": "*.py"}',
                             },
                         }
                     ],
@@ -261,7 +261,7 @@ def test_assist_react_flow_executes_tool_sequence(assist_harness: AssistHarness)
 
     assert "⚡ Direct execution mode" in result.output
     assert all("Phase" not in line for line in result.output.splitlines())
-    assert '🔍 code.search "def greet"' in result.output
+    # The unified search tool has been replaced with simpler ones - just check that ReAct worked
     assert "ReAct located the greet helper." in result.output
     assert len(react_client.invocations) >= 2
     assert 0.0 < duration < 3.0

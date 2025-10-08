@@ -9,12 +9,21 @@ import click
 
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.core.utils.tool_utils import expand_tool_aliases
+from ai_dev_agent.tools import (
+    READ,
+    WRITE,
+    RUN,
+    FIND,
+    GREP,
+    SYMBOLS,
+)
 
 from ..utils import (
     _invoke_registry_tool,
     _normalize_argument_list,
     build_system_context,
 )
+
 
 
 _REGEX_HINT_PATTERNS: Tuple[re.Pattern[str], ...] = (
@@ -82,101 +91,82 @@ class RegistryIntent:
         return result
 
 
-def _build_code_search_payload(
-    ctx: click.Context, arguments: Dict[str, Any]
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _build_find_payload(ctx: click.Context, arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     query = str(arguments.get("query", "")).strip()
     if not query:
-        raise click.ClickException("code.search requires a 'query' argument.")
+        raise click.ClickException("find requires a 'query' argument.")
 
-    settings: Settings = ctx.obj["settings"]
-    default_max_results = max(1, getattr(settings, "search_max_results", 100))
     payload: Dict[str, Any] = {"query": query}
+    if "path" in arguments and arguments["path"] is not None:
+        payload["path"] = str(arguments["path"])
+
+    if "limit" in arguments and arguments["limit"] is not None:
+        try:
+            payload["limit"] = max(1, int(arguments["limit"]))
+        except (TypeError, ValueError):
+            raise click.ClickException("--limit must be an integer") from None
+
+    fuzzy = arguments.get("fuzzy")
+    if fuzzy is not None:
+        payload["fuzzy"] = bool(fuzzy)
+
+    return payload, {}
+
+
+def _build_grep_payload(ctx: click.Context, arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pattern = str(arguments.get("pattern", "")).strip()
+    if not pattern:
+        raise click.ClickException("grep requires a 'pattern' argument.")
+
+    payload: Dict[str, Any] = {"pattern": pattern}
+    if "path" in arguments and arguments["path"] is not None:
+        payload["path"] = str(arguments["path"])
 
     if "regex" in arguments:
-        payload["regex"] = bool(arguments.get("regex"))
-    elif _should_enable_regex(query):
+        payload["regex"] = bool(arguments["regex"])
+    elif _should_enable_regex(pattern):
         payload["regex"] = True
 
-    max_results = default_max_results
-    if "max_results" in arguments:
+    if "limit" in arguments and arguments["limit"] is not None:
         try:
-            max_results = int(arguments.get("max_results", default_max_results))
+            payload["limit"] = max(1, int(arguments["limit"]))
         except (TypeError, ValueError):
-            max_results = default_max_results
-        payload["max_results"] = max_results
-    else:
-        payload["max_results"] = max_results
+            raise click.ClickException("--limit must be an integer") from None
 
-    where = arguments.get("where")
-    if isinstance(where, list):
-        payload["where"] = [str(x) for x in where]
-
-    return payload, {"max_results": max_results}
+    return payload, {}
 
 
-def _handle_code_search_result(
-    _: click.Context,
-    __: Dict[str, Any],
-    result: Dict[str, Any],
-    context: Dict[str, Any],
-) -> None:
-    matches = result.get("matches", [])
-    if not matches:
-        click.echo("No matches found.")
-        return
+def _build_symbols_payload(ctx: click.Context, arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    name = str(arguments.get("name", "")).strip()
+    if not name:
+        raise click.ClickException("symbols requires a 'name' argument.")
 
-    max_results = context.get("max_results", len(matches))
-    limited_matches = matches[:max_results]
-    for match in limited_matches:
-        path = match.get("path")
-        line = match.get("line")
-        col = match.get("col")
-        preview = match.get("preview", "")
-        click.echo(f"{path}:{line}:{col} {preview}")
+    payload: Dict[str, Any] = {"name": name}
 
-        structure_summary = match.get("structure_summary")
-        if not structure_summary:
-            structure = match.get("structure") or {}
-            summary_parts: List[str] = []
-            path_components = structure.get("path") or []
-            if path_components:
-                summary_parts.append(".".join(path_components))
-            symbol_kind = structure.get("kind")
-            if symbol_kind:
-                summary_parts.append(symbol_kind)
-            depth = structure.get("depth")
-            if depth:
-                summary_parts.append(f"depth {depth}")
-            symbol_line = structure.get("line")
-            if symbol_line:
-                summary_parts.append(f"line {symbol_line}")
-            if summary_parts:
-                structure_summary = "within " + " • ".join(summary_parts)
+    if "path" in arguments and arguments["path"] is not None:
+        payload["path"] = str(arguments["path"])
 
-        if structure_summary:
-            click.echo(f"    structure: {structure_summary}")
+    if "limit" in arguments and arguments["limit"] is not None:
+        try:
+            payload["limit"] = max(1, int(arguments["limit"]))
+        except (TypeError, ValueError):
+            raise click.ClickException("--limit must be an integer") from None
 
-        import_context = match.get("import_context") or []
-        if import_context:
-            joined = "; ".join(import_context)
-            click.echo(f"    imports: {joined}")
+    if "kind" in arguments and arguments["kind"]:
+        payload["kind"] = str(arguments["kind"])
 
-    remaining = len(matches) - len(limited_matches)
-    if remaining > 0:
-        click.echo(
-            "... (+{remaining} additional matches not shown; refine your query or increase --max-results)".format(
-                remaining=remaining
-            )
-        )
+    if "lang" in arguments and arguments["lang"]:
+        payload["lang"] = str(arguments["lang"])
+
+    return payload, {}
 
 
-def _build_fs_read_payload(
+def _build_read_payload(
     ctx: click.Context, arguments: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     paths = _normalize_argument_list(arguments, plural_key="paths", singular_key="path")
     if not paths:
-        raise click.ClickException("fs.read requires 'paths' (or a single 'path').")
+        raise click.ClickException("read requires 'paths' (or a single 'path').")
 
     payload: Dict[str, Any] = {"paths": paths}
     if "context_lines" in arguments:
@@ -193,7 +183,7 @@ def _build_fs_read_payload(
     return payload, {}
 
 
-def _handle_fs_read_result(
+def _handle_read_result(
     ctx: click.Context,
     arguments: Dict[str, Any],
     result: Dict[str, Any],
@@ -293,65 +283,6 @@ def _handle_fs_read_result(
             click.echo(f"No content available in the requested range for {rel_path}.")
 
 
-def _build_symbols_find_payload(
-    ctx: click.Context, arguments: Dict[str, Any]
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    name = str(arguments.get("name", "")).strip()
-    if not name:
-        raise click.ClickException("symbols.find requires a 'name' argument.")
-
-    payload: Dict[str, Any] = {"name": name}
-    if arguments.get("kind"):
-        payload["kind"] = str(arguments.get("kind"))
-    if arguments.get("lang"):
-        payload["lang"] = str(arguments.get("lang"))
-    return payload, {}
-
-
-def _handle_symbols_find_result(
-    _: click.Context,
-    __: Dict[str, Any],
-    result: Dict[str, Any],
-    ___: Dict[str, Any],
-) -> None:
-    defs = result.get("defs", [])
-    if not defs:
-        click.echo("No definitions found.")
-        return
-    for definition in defs:
-        click.echo(f"{definition.get('path')}:{definition.get('line')} {definition.get('kind', '')}")
-
-
-def _recover_symbols_find(
-    ctx: click.Context,
-    arguments: Dict[str, Any],
-    payload: Dict[str, Any],
-    context: Dict[str, Any],
-    exc: Exception,
-) -> Dict[str, Any]:
-    if isinstance(exc, FileNotFoundError):
-        try:
-            _invoke_registry_tool(ctx, "symbols.index", {})
-        except Exception as index_exc:
-            raise click.ClickException(
-                f"Symbol index not found and indexing failed: {index_exc}. "
-                "Install Universal Ctags (e.g., brew install universal-ctags) or use code.search."
-            ) from index_exc
-        return _invoke_registry_tool(ctx, "symbols.find", payload)
-
-    raise click.ClickException(f"symbols.find failed: {exc}") from exc
-
-
-def _build_symbols_index_payload(
-    ctx: click.Context, arguments: Dict[str, Any]
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    paths = _normalize_argument_list(arguments, plural_key="paths", singular_key="path")
-    payload: Dict[str, Any] = {}
-    if paths:
-        payload["paths"] = paths
-    return payload, {}
-
-
 def _handle_symbols_index_result(
     _: click.Context,
     __: Dict[str, Any],
@@ -374,33 +305,6 @@ def _handle_symbols_index_result(
         click.echo(f"Index written to {db_path}")
 
 
-def _build_ast_query_payload(
-    ctx: click.Context, arguments: Dict[str, Any]
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    path = str(arguments.get("path", "")).strip()
-    query = str(arguments.get("query", "")).strip()
-    if not path or not query:
-        raise click.ClickException("ast.query requires 'path' and 'query'.")
-
-    payload: Dict[str, Any] = {"path": path, "query": query}
-    if arguments.get("captures"):
-        payload["captures"] = [str(c) for c in (arguments.get("captures") or [])]
-    return payload, {}
-
-
-def _handle_ast_query_result(
-    _: click.Context,
-    __: Dict[str, Any],
-    result: Dict[str, Any],
-    ___: Dict[str, Any],
-) -> None:
-    nodes = result.get("nodes", [])
-    click.echo(f"Matched {len(nodes)} node(s)")
-    for node in nodes[:5]:
-        snippet = (node.get("text") or "").strip().replace("\n", " ")
-        click.echo(f"- {snippet[:120]}")
-
-
 def _build_exec_payload(
     ctx: click.Context, arguments: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -410,7 +314,7 @@ def _build_exec_payload(
     cmd = str(cmd_value or "").strip()
     if not cmd:
         raise click.ClickException(
-            "exec requires 'cmd'. Received arguments: "
+            f"{RUN} requires 'cmd'. Received arguments: "
             f"{arguments}. System: {system_context.get('os')}. "
             "Ensure the LLM provided a valid command for this platform."
         )
@@ -452,12 +356,12 @@ def _handle_exec_result(
         click.echo(result["stderr_tail"].rstrip())
 
 
-def _build_fs_write_patch_payload(
+def _build_write_payload(
     ctx: click.Context, arguments: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     diff = arguments.get("diff")
     if not isinstance(diff, str) or not diff.strip():
-        raise click.ClickException("fs.write_patch requires 'diff' content.")
+        raise click.ClickException("write requires 'diff' content.")
 
     settings: Settings = ctx.obj["settings"]
     if not settings.auto_approve_code:
@@ -466,7 +370,7 @@ def _build_fs_write_patch_payload(
     return {"diff": diff}, {}
 
 
-def _handle_fs_write_patch_result(
+def _handle_write_result(
     _: click.Context,
     __: Dict[str, Any],
     result: Dict[str, Any],
@@ -488,44 +392,92 @@ def _handle_fs_write_patch_result(
         for filename in changed:
             click.echo(f"- {filename}")
 
+def _handle_simple_result(ctx, arguments, result, _) -> None:
+    """Simple result handler for tools that return clean output."""
+    # Echo file lists
+    if "files" in result:
+        for entry in result["files"]:
+            if isinstance(entry, Mapping):
+                path = entry.get("path", str(entry))
+                score = entry.get("score")
+                meta_parts = []
+                if entry.get("lines") is not None:
+                    meta_parts.append(f"{entry['lines']} lines")
+                if entry.get("size_bytes") is not None:
+                    size_kb = entry["size_bytes"] / 1024 if isinstance(entry["size_bytes"], (int, float)) else None
+                    if size_kb is not None:
+                        meta_parts.append(f"{size_kb:.1f} KB")
+                if entry.get("mtime"):
+                    meta_parts.append(entry["mtime"])
+                if score is not None:
+                    meta_parts.append(f"score {score}")
+                suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
+                click.echo(f"{path}{suffix}")
+            else:
+                click.echo(str(entry))
+
+    # Echo grep matches
+    elif "matches" in result:
+        for match_group in result["matches"]:
+            if isinstance(match_group, str):
+                click.echo(match_group)
+                continue
+
+            file_path = match_group.get("file") if isinstance(match_group, dict) else None
+            if file_path:
+                click.echo(f"\n{file_path}:")
+
+            entries = match_group.get("matches", []) if isinstance(match_group, dict) else []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    line_no = entry.get("line", "?")
+                    text = entry.get("text", "")
+                else:
+                    line_no = "?"
+                    text = str(entry)
+                click.echo(f"  {line_no}: {text}")
+
+    # Echo symbols
+    elif "symbols" in result:
+        for symbol in result["symbols"]:
+            click.echo(f"{symbol['file']}:{symbol.get('line', '?')} - {symbol['name']} ({symbol.get('kind', 'unknown')})")
+
+    # Echo errors
+    if "error" in result:
+        click.secho(f"Error: {result['error']}", fg="red")
+
 
 REGISTRY_INTENTS: Dict[str, RegistryIntent] = {
-    "code.search": RegistryIntent(
-        tool_name="code.search",
-        payload_builder=_build_code_search_payload,
-        result_handler=_handle_code_search_result,
+    FIND: RegistryIntent(
+        tool_name=FIND,
+        payload_builder=_build_find_payload,
+        result_handler=_handle_simple_result,
     ),
-    "fs.read": RegistryIntent(
-        tool_name="fs.read",
-        payload_builder=_build_fs_read_payload,
-        result_handler=_handle_fs_read_result,
+    GREP: RegistryIntent(
+        tool_name=GREP,
+        payload_builder=_build_grep_payload,
+        result_handler=_handle_simple_result,
     ),
-    "symbols.find": RegistryIntent(
-        tool_name="symbols.find",
-        payload_builder=_build_symbols_find_payload,
-        result_handler=_handle_symbols_find_result,
-        recovery_handler=_recover_symbols_find,
+    SYMBOLS: RegistryIntent(
+        tool_name=SYMBOLS,
+        payload_builder=_build_symbols_payload,
+        result_handler=_handle_simple_result,
     ),
-    "symbols.index": RegistryIntent(
-        tool_name="symbols.index",
-        payload_builder=_build_symbols_index_payload,
-        result_handler=_handle_symbols_index_result,
+    READ: RegistryIntent(
+        tool_name=READ,
+        payload_builder=_build_read_payload,
+        result_handler=_handle_read_result,
     ),
-    "ast.query": RegistryIntent(
-        tool_name="ast.query",
-        payload_builder=_build_ast_query_payload,
-        result_handler=_handle_ast_query_result,
-    ),
-    "exec": RegistryIntent(
-        tool_name="exec",
+    RUN: RegistryIntent(
+        tool_name=RUN,
         payload_builder=_build_exec_payload,
         result_handler=_handle_exec_result,
         with_sandbox=False,
     ),
-    "fs.write_patch": RegistryIntent(
-        tool_name="fs.write_patch",
-        payload_builder=_build_fs_write_patch_payload,
-        result_handler=_handle_fs_write_patch_result,
+    WRITE: RegistryIntent(
+        tool_name=WRITE,
+        payload_builder=_build_write_payload,
+        result_handler=_handle_write_result,
     ),
 }
 

@@ -57,3 +57,61 @@ def test_reactive_executor_passes_once_all_gates_satisfied():
     assert result.gates["tests"] is True
     assert result.gates["diff_limits"] is True
     assert result.gates["patch_coverage"] is True
+
+
+def test_reactive_executor_without_evaluator_stops_on_iteration_complete():
+    executor = ReactiveExecutor(default_max_steps=3)
+
+    task = TaskSpec(identifier="T2", goal="Simple task", category="assist")
+
+    def action_provider(_task, history):
+        if history:
+            raise StopIteration()
+        return ActionRequest(
+            step_id="S1",
+            thought="Read file",
+            tool="read",
+            args={"path": "README.md"},
+        )
+
+    def tool_invoker(_action):
+        return Observation(
+            success=True,
+            outcome="Read complete",
+            tool="read",
+            metrics={},
+        )
+
+    result = executor.run(task, action_provider, tool_invoker)
+
+    assert result.status == "success"
+    assert result.stop_reason == "Completed"
+    assert len(result.steps) == 1
+
+
+def test_reactive_executor_without_evaluator_honours_budget():
+    executor = ReactiveExecutor(default_max_steps=1)
+
+    task = TaskSpec(identifier="T3", goal="Budget test", category="assist")
+
+    def action_provider(_task, _history):
+        return ActionRequest(
+            step_id="S1",
+            thought="Run command",
+            tool="run",
+            args={"cmd": "echo hi"},
+        )
+
+    def tool_invoker(_action):
+        return Observation(
+            success=True,
+            outcome="Command executed",
+            tool="run",
+            metrics={},
+        )
+
+    result = executor.run(task, action_provider, tool_invoker)
+
+    assert result.status == "failed"
+    assert result.stop_reason == "Step budget exhausted."
+    assert len(result.steps) == 1

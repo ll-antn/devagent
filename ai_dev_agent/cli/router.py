@@ -8,9 +8,17 @@ from uuid import uuid4
 
 from ai_dev_agent.cli.utils import build_system_context
 from ai_dev_agent.core.utils.config import Settings
-from ai_dev_agent.core.utils.tool_utils import sanitize_tool_name
+# Tool metadata is registered directly under canonical names
 from ai_dev_agent.providers.llm.base import LLMClient, LLMError, ToolCallResult
-from ai_dev_agent.tools import registry as tool_registry
+from ai_dev_agent.tools import (
+    registry as tool_registry,
+    READ,
+    WRITE,
+    RUN,
+    FIND,
+    GREP,
+    SYMBOLS,
+)
 from ai_dev_agent.session import SessionManager, build_system_messages
 
 DEFAULT_TOOLS: List[Dict[str, Any]] = []
@@ -66,13 +74,12 @@ class IntentRouter:
     def _build_registry_tools(self, settings: Settings, used_names: set[str]) -> List[Dict[str, Any]]:
         """Translate registry specs into LLM tool definitions for a safelist."""
         safelist = [
-            "symbols.index",
-            "code.search",
-            "fs.read",
-            "symbols.find",
-            "ast.query",
-            "exec",
-            "fs.write_patch",
+            FIND,             # Simple file finding
+            GREP,             # Simple content search
+            SYMBOLS,          # Simple symbol lookup
+            READ,
+            RUN,
+            WRITE,
         ]
         tools: List[Dict[str, Any]] = []
         for name in safelist:
@@ -80,40 +87,35 @@ class IntentRouter:
                 spec = tool_registry.get(name)
             except KeyError:
                 continue
+            if name in used_names:
+                continue
             try:
                 with spec.request_schema_path.open("r", encoding="utf-8") as handle:
                     params_schema = json.load(handle)
             except Exception:
                 params_schema = {"type": "object", "properties": {}, "additionalProperties": True}
 
-            if name == "exec":
-                params_schema = self._augment_exec_schema(params_schema)
+            if name == RUN:
+                params_schema = self._augment_run_schema(params_schema)
 
             description = spec.description or ""
-            if name == "exec":
-                description = self._augment_exec_description(description)
-            if name == "fs.write_patch" and not getattr(settings, "auto_approve_code", False):
+            if name == RUN:
+                description = self._augment_run_description(description)
+            if name == WRITE and not getattr(settings, "auto_approve_code", False):
                 description = (description or "Apply a unified diff") + \
                               " (auto_approve_code is recommended for automated edits)"
-
-            base_name = sanitize_tool_name(name)
-            safe_name = base_name
-            suffix = 1
-            while safe_name in used_names:
-                suffix += 1
-                safe_name = f"{base_name}_{suffix}"
-            used_names.add(safe_name)
 
             tools.append(
                 {
                     "type": "function",
                     "function": {
-                        "name": safe_name,
+                        "name": name,
                         "description": description,
                         "parameters": params_schema,
                     },
                 }
             )
+            used_names.add(name)
         return tools
 
     def route(self, prompt: str) -> IntentDecision:
@@ -222,11 +224,11 @@ class IntentRouter:
             "TOOL PERFORMANCE SIGNALS:",
             *self._tool_performance_lines(),
             "IMPORTANT:",
-            f"- Use {'Unix' if ctx['is_unix'] else 'Windows'} command syntax and validate commands exist before invoking exec.",
-            "- Never emit empty 'cmd' values for exec-related tools; include all required arguments.",
-            "- Prefer registry tools over 'exec'; only run commands when no dedicated tool applies.",
-            "- Locate files with 'code.search' or 'symbols.index' + 'symbols.find' before using 'fs.read'.",
-            "- Use 'fs.read' with specific paths and optional 'context_lines' to keep outputs small.",
+            f"- Use {'Unix' if ctx['is_unix'] else 'Windows'} command syntax and validate commands exist before invoking {RUN}.",
+            f"- Never emit empty 'cmd' values for {RUN}; include all required arguments.",
+            f"- Prefer registry tools over '{RUN}'; only run commands when no dedicated tool applies.",
+            f"- Locate files with '{FIND}', '{GREP}', or '{SYMBOLS}' before using '{READ}'.",
+            f"- Use '{READ}' with specific paths and optional 'context_lines' to keep outputs small.",
             f"- The repository root is at '{workspace}'. Return concise rationales when helpful.",
             "- Exploit tools with higher historical success before falling back to slower options.",
             "- When success rates are low or uncertain, capture rationale and propose safer alternatives.",
@@ -310,7 +312,7 @@ class IntentRouter:
 
         return lines
 
-    def _augment_exec_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+    def _augment_run_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         ctx = self._system_context
         updated = dict(schema)
         updated["description"] = (
@@ -330,7 +332,7 @@ class IntentRouter:
         updated["properties"] = properties
         return updated
 
-    def _augment_exec_description(self, description: str) -> str:
+    def _augment_run_description(self, description: str) -> str:
         ctx = self._system_context
         base = description or "Execute a shell command."
         available_tools = ", ".join(ctx["available_tools"]) if ctx["available_tools"] else "none detected"

@@ -11,12 +11,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set
 from ai_dev_agent.core.utils.config import DEFAULT_MAX_ITERATIONS, Settings
 from ai_dev_agent.core.utils.context_budget import summarize_text
 from ai_dev_agent.providers.llm.base import Message
+from ai_dev_agent.tools import READ, WRITE, FIND, GREP, SYMBOLS, RUN
 
 _LANGUAGE_HINTS: Dict[str, str] = {
-    "python": "\n- Use ast_query for Python code structure\n- Check requirements.txt/setup.py for dependencies\n- Use import analysis for module relationships",
-    "javascript": "\n- Consider package.json for dependencies\n- Use ast_query for JS/TS structure\n- Check for .eslintrc for code standards",
-    "typescript": "\n- Check tsconfig.json for compilation settings\n- Use ast_query for TypeScript analysis\n- Consider type definitions in .d.ts files",
-    "java": "\n- Check pom.xml or build.gradle for dependencies\n- Use ast_query for class hierarchies\n- Consider package structure for organization",
+    "python": "\n- Use symbols for Python code structure\n- Check requirements.txt/setup.py for dependencies\n- Use import analysis for module relationships",
+    "javascript": "\n- Consider package.json for dependencies\n- Use symbols for JS/TS structure\n- Check for .eslintrc for code standards",
+    "typescript": "\n- Check tsconfig.json for compilation settings\n- Use symbols for TypeScript analysis\n- Consider type definitions in .d.ts files",
+    "java": "\n- Check pom.xml or build.gradle for dependencies\n- Use symbols for class hierarchies\n- Consider package structure for organization",
     "c++": "\n- Check CMakeLists.txt or Makefile for build config\n- Look for .h/.hpp headers separately from .cpp/.cc files\n- Use compile_commands.json if available",
     "c": "\n- Check Makefile or CMakeLists.txt for build setup\n- Analyze header files (.h) for interfaces\n- Use grep for macro definitions",
     "go": "\n- Check go.mod for module dependencies\n- Use go tools for analysis\n- Consider internal vs external packages",
@@ -200,7 +201,7 @@ def _react_guidance(
 
     tool_semantics = (
         "\nTOOL SEMANTICS:\n"
-        "- exec: Runs commands in POSIX shell; pipes, globs, redirects work\n"
+        f"- {RUN}: Runs commands in POSIX shell; pipes, globs, redirects work\n"
         "- Prefer machine-parsable output (e.g. find -print0) over formatted listings\n"
         "- Minimise tool calls – stop once you have the answer\n"
         "\nPARALLEL TOOL EXECUTION:\n"
@@ -209,8 +210,8 @@ def _react_guidance(
         "- Independent tool calls will execute concurrently, providing 3-5x speedup\n"
         "- Examples:\n"
         "  • Reading 3 different files: batch into one response instead of 3 sequential calls\n"
-        "  • Multiple searches: run code_search queries in parallel\n"
-        "  • File read + search: execute simultaneously if independent\n"
+        f"  • Multiple searches: run {FIND}/{GREP} queries in parallel\n"
+        f"  • File read + search: execute simultaneously if independent\n"
         "- IMPORTANT: Only batch truly independent operations (don't batch if one depends on another's result)\n"
     )
 
@@ -226,11 +227,11 @@ def _react_guidance(
         "\nWhen modifying code:\n"
         "1. Read the file first to understand context and conventions\n"
         "2. Follow existing code style (indentation, naming, imports)\n"
-        "3. Use fs.write_patch for surgical changes to existing files\n"
+        f"3. Use {WRITE} for surgical changes to existing files\n"
         "4. Don't modify unrelated code - stay focused on the task\n"
         "5. Verify library imports exist in the project before using them\n"
         "\nFormat for file changes:\n"
-        "- Use unified diff format (fs.write_patch) for existing files\n"
+        f"- Use unified diff format ({WRITE}) for existing files\n"
         "- Show context lines around changes for clarity\n"
         "- Make multiple small patches rather than one large rewrite\n"
         "\nExample patch structure:\n"
@@ -280,17 +281,16 @@ def _react_guidance(
         "- Don't read files you've already read\n"
         "- Don't run tests without knowing the test command\n"
         "- Don't assume build tools or frameworks are available\n"
-        "\nSecurity:\n"
-        "- Never commit API keys, passwords, or secrets\n"
-        "- Don't log sensitive information\n"
-        "- Run security.secrets_scan before committing if unsure\n"
-    )
+"\nSecurity:\n"
+"- Never commit API keys, passwords, or secrets\n"
+"- Don't log sensitive information\n"
+)
 
     tool_guidance = (
         "\nUNIVERSAL TOOL STRATEGIES:\n"
         "- For counting/metrics: Use shell commands with find/grep/wc\n"
-        "- For pattern search: Start with code_search, then read specific files\n"
-        "- For exploration: Use ast_query for structure, symbols for definitions\n"
+        "- For pattern search: Start with grep or find, then read specific files\n"
+        "- For exploration: Use symbols for structure and definitions\n"
         "- For bulk operations: Generate and execute scripts\n"
         "- For file operations: Prefer find/xargs over individual reads\n"
         "- Verify unexpected results (especially counts <=1) with pwd and ls -la\n"
@@ -298,74 +298,76 @@ def _react_guidance(
 
     tool_priority = (
         "\nTOOL SELECTION GUIDE:\n"
-        "- Counting/metrics -> exec with scripts\n"
-        "- Pattern search -> code_search\n"
-        "- Code structure -> ast_query\n"
-        "- Specific files -> fs.read\n"
-        "- Bulk operations -> exec with find/xargs\n"
-        "- Complex analysis -> Generate analysis scripts\n"
+        f"- Finding files -> {FIND} ('*.py' or '**/test_*.js')\n"
+        f"- Searching content -> {GREP} ('TODO' or 'error.*', regex=true)\n"
+        f"- Finding symbols -> {SYMBOLS} ('ClassName' or 'functionName')\n"
+        f"- Reading specific files -> {READ}\n"
+        f"- Running commands -> {RUN}\n"
+        f"- Making changes -> {WRITE}\n"
     )
 
     tool_descriptions = (
         "\nDETAILED TOOL DESCRIPTIONS:\n"
-        "\nfs.read:\n"
+        "\nfind:\n"
+        "  Purpose: Find files by pattern using ripgrep glob syntax\n"
+        "  When to use: Looking for files by name or extension\n"
+        "  Examples:\n"
+        "    find('*.py') - all Python files\n"
+        "    find('**/test_*.js') - test files in any directory\n"
+        "    find('src/**/*.ts') - TypeScript files under src\n"
+        "  Parameters: query (glob pattern), path (optional), limit (default 100)\n"
+        "  Results: Sorted by modification time (newest first)\n"
+        "\ngrep:\n"
+        "  Purpose: Search content in files using ripgrep\n"
+        "  When to use: Finding specific text or patterns in code\n"
+        "  Examples:\n"
+        "    grep('TODO') - find all TODO comments\n"
+        "    grep('func.*name', regex=true) - regex search\n"
+        "    grep('error', path='src/') - search only in src\n"
+        "  Parameters: pattern, path (optional), regex (default false), limit\n"
+        "  Results: Grouped by file, sorted by modification time\n"
+        "\nsymbols:\n"
+        "  Purpose: Find symbol definitions using universal ctags\n"
+        "  When to use: Looking for functions, classes, variables by name\n"
+        "  Examples:\n"
+        "    symbols('MyClass') - find class definition\n"
+        "    symbols('process_data') - find function definition\n"
+        "  Parameters: name (substring match), path (optional), limit\n"
+        "  Note: Requires ctags/universal-ctags to be installed\n"
+        f"\n{READ}:\n"
         "  Purpose: Read file contents from the repository\n"
-        "  When to use: When you need to examine specific files you already know exist\n"
+        "  When to use: After finding files with find/grep/symbols\n"
         "  Parameters: paths (list of strings), optional context_lines or byte_range\n"
-        "  Example: Use after code_search to read the files that matched your search\n"
-        "\ncode.search:\n"
-        "  Purpose: Search repository text for patterns (fixed string or regex)\n"
-        "  When to use: When you need to find files containing specific text or code patterns\n"
-        "  Parameters: query (string), optional regex=true, file_type, max_results\n"
-        "  Example: Search for function definitions before reading the full file\n"
-        "  Note: Default is FIXED STRING matching; use regex=true for patterns\n"
-        "\nsymbols.index:\n"
-        "  Purpose: Build or refresh the ctags symbol index\n"
-        "  When to use: Once at the start of a session, or after significant file changes\n"
-        "  Parameters: None\n"
-        "  Note: Run this before using symbols.find\n"
-        "\nsymbols.find:\n"
-        "  Purpose: Look up symbol definitions (functions, classes, variables)\n"
-        "  When to use: When you need to find where a specific symbol is defined\n"
-        "  Parameters: name (string), optional kind (function, class, variable, etc.)\n"
-        "  Example: Find the definition of 'DatabaseConnection' class\n"
-        "\nast.query:\n"
-        "  Purpose: Run tree-sitter queries for precise code structure analysis\n"
-        "  When to use: When you need to find specific code patterns across the syntax tree\n"
-        "  Parameters: path (string), query (tree-sitter query string)\n"
-        "  Supported: Python, JavaScript, TypeScript, Go, Rust, C, C++, Java\n"
-        "  Example: Find all function definitions with specific decorators\n"
-        "\nexec:\n"
+        f"\n{RUN}:\n"
         "  Purpose: Execute shell commands directly\n"
-        "  When to use: For git operations, running tests, building, or complex file operations\n"
+        "  When to use: For git operations, running tests, building\n"
         "  Parameters: cmd (string), optional args (list)\n"
-        "  Caution: Always verify commands are safe before execution\n"
-        "\nfs.write_patch:\n"
+        f"\n{WRITE}:\n"
         "  Purpose: Apply unified diff patches to files\n"
-        "  When to use: When making precise, reviewable changes to existing files\n"
+        "  When to use: Making precise changes to existing files\n"
         "  Parameters: patches (list of {path, patch_text})\n"
-        "  Note: Prefer this over rewriting entire files\n"
-        "\nsecurity.secrets_scan:\n"
-        "  Purpose: Scan files for potential secrets, keys, credentials\n"
-        "  When to use: Before committing changes, or when reviewing security\n"
-        "  Parameters: paths (list of strings)\n"
-        "  Note: Helps prevent accidental credential leaks\n"
     )
 
     tool_workflows = (
         "\nCOMMON TOOL WORKFLOWS:\n"
-        "\nDiscovering code:\n"
-        "  1. code_search for keywords -> 2. fs.read matching files -> 3. ast.query for details\n"
+        "\nFinding files:\n"
+        "  1. find('*.py') -> Lists all Python files\n"
+        f"  2. {READ} to examine specific files\n"
         "\nFinding and modifying a function:\n"
-        "  1. symbols.index -> 2. symbols.find 'function_name' -> 3. fs.read -> 4. fs.write_patch\n"
-        "\nUnderstanding project structure:\n"
-        "  1. exec 'find . -type f -name \"*.py\" | head -20' -> 2. fs.read key files\n"
+        "  1. symbols('function_name') -> Finds definition\n"
+        f"  2. {READ} the file to see full context\n"
+        f"  3. {WRITE} to make changes\n"
+        "\nSearching for patterns:\n"
+        "  1. grep('TODO') -> Finds all occurrences\n"
+        "  2. grep('error.*handling', regex=true) for complex patterns\n"
         "\nRefactoring across files:\n"
-        "  1. code_search for usage -> 2. fs.read all matches -> 3. fs.write_patch each file\n"
-        "\nDon't repeat tool calls:\n"
-        "  - If code_search found no results, don't search again with same query\n"
-        "  - If fs.read succeeded, don't read the same file again\n"
-        "  - If symbols.index just ran, don't run it again in the same session\n"
+        "  1. grep for usage patterns\n"
+        f"  2. {READ} files that need changes\n"
+        f"  3. {WRITE} each file\n"
+        "\nSimple principles:\n"
+        f"  - {FIND} for files, {GREP} for content, {SYMBOLS} for definitions\n"
+        "  - Results are sorted by modification time (newest first)\n"
+        "  - No hidden heuristics - what you search is what you get\n"
     )
 
     return (

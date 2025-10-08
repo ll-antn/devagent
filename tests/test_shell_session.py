@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from ai_dev_agent.core.utils.config import Settings
-from ai_dev_agent.tools import ToolContext, registry as tool_registry
+from ai_dev_agent.tools import ToolContext, registry as tool_registry, RUN
 from ai_dev_agent.tools.execution.shell_session import ShellSessionManager
 
 
@@ -63,13 +63,13 @@ def test_exec_tool_uses_persistent_shell(tmp_path: Path) -> None:
     context = _make_context(tmp_path, manager, session_id)
 
     try:
-        initial = tool_registry.invoke("exec", {"cmd": "pwd"}, context)
+        initial = tool_registry.invoke(RUN, {"cmd": "pwd"}, context)
         assert str(tmp_path) in initial["stdout_tail"].strip()
 
         nested = tmp_path / "persist"
         nested.mkdir()
-        tool_registry.invoke("exec", {"cmd": "cd", "args": ["persist"]}, context)
-        follow_up = tool_registry.invoke("exec", {"cmd": "pwd"}, context)
+        tool_registry.invoke(RUN, {"cmd": "cd", "args": ["persist"]}, context)
+        follow_up = tool_registry.invoke(RUN, {"cmd": "pwd"}, context)
         assert str(nested) in follow_up["stdout_tail"].strip()
     finally:
         manager.close_all()

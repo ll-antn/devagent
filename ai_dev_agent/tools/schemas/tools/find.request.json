@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Glob pattern to match files (e.g., '*.py', '**/test_*.js')"
+    },
+    "path": {
+      "type": "string",
+      "description": "Directory to search in (default: '.')",
+      "default": "."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of files to return",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 100
+    },
+    "fuzzy": {
+      "type": "boolean",
+      "description": "Enable fuzzy filename ranking"
+    }
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}

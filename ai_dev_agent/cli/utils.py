@@ -24,7 +24,6 @@ from ai_dev_agent.core.utils.repo_outline import generate_repo_outline
 from ai_dev_agent.core.utils.keywords import extract_keywords
 from ai_dev_agent.core.utils.logger import get_logger, set_correlation_id
 from ai_dev_agent.core.utils.state import InMemoryStateStore, StateStore
-from ai_dev_agent.engine.react.tool_strategy import ToolSelectionStrategy
 from ai_dev_agent.providers.llm import (
     DEEPSEEK_DEFAULT_BASE_URL,
     RetryConfig,
@@ -241,46 +240,102 @@ def _merge_structure_hints_state(state: Dict[str, Any], payload: Optional[Dict[s
 def _update_files_discovered(files_discovered: Set[str], payload: Optional[Dict[str, Any]]) -> None:
     if not payload:
         return
-    for file_entry in payload.get("files", []) or []:
-        path = file_entry.get("path")
+    files_value = payload.get("files", [])
+    if isinstance(files_value, Mapping):
+        iterable_files = files_value.values()
+    elif isinstance(files_value, Iterable) and not isinstance(files_value, (str, bytes)):
+        iterable_files = files_value
+    else:
+        iterable_files = ()
+
+    for file_entry in iterable_files:
+        if isinstance(file_entry, Mapping):
+            path = file_entry.get("path")
+        else:
+            path = file_entry
         if path:
             files_discovered.add(str(path))
 
-    for match in payload.get("matches", []) or []:
-        path = match.get("path")
+    matches_value = payload.get("matches", [])
+    if isinstance(matches_value, Iterable) and not isinstance(matches_value, (str, bytes)):
+        matches_iterable = matches_value
+    else:
+        matches_iterable = ()
+
+    for match in matches_iterable:
+        if isinstance(match, Mapping):
+            path = match.get("path")
+        else:
+            path = match
         if path:
             files_discovered.add(str(path))
 
-    for summary in payload.get("summaries", []) or []:
-        path = summary.get("path")
+    summaries_value = payload.get("summaries", [])
+    if isinstance(summaries_value, Iterable) and not isinstance(summaries_value, (str, bytes)):
+        summaries_iterable = summaries_value
+    else:
+        summaries_iterable = ()
+
+    for summary in summaries_iterable:
+        if isinstance(summary, Mapping):
+            path = summary.get("path")
+        else:
+            path = summary
         if path:
             files_discovered.add(str(path))
+
+
+_LANGUAGE_EXTENSIONS = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "csharp",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".m": "objective-c",
+    ".mm": "objective-c++",
+    ".sh": "shell",
+    ".bash": "shell",
+}
 
 
 def _detect_repository_language(
-    strategy: ToolSelectionStrategy,
     repo_root: Path,
     *,
     max_files: int = 400,
 ) -> Tuple[Optional[str], Optional[int]]:
-    file_paths: List[str] = []
-    count = 0
+    counts: Dict[str, int] = {}
+    total = 0
     try:
         for path in repo_root.rglob("*"):
-            if count >= max_files:
+            if total >= max_files:
                 break
-            if path.is_file():
-                count += 1
-                try:
-                    rel = str(path.relative_to(repo_root))
-                except ValueError:
-                    rel = str(path)
-                file_paths.append(rel)
+            if not path.is_file():
+                continue
+            total += 1
+            ext = path.suffix.lower()
+            language = _LANGUAGE_EXTENSIONS.get(ext)
+            if language:
+                counts[language] = counts.get(language, 0) + 1
     except OSError:
         pass
 
-    language = strategy.detect_language(file_paths)
-    return language, count if count else None
+    language = max(counts, key=counts.get) if counts else None
+    return language, total if total else None
 
 
 def infer_task_files(task: Mapping[str, Any], repo_root: Path) -> List[str]:
@@ -645,4 +700,3 @@ def _build_context_pruning_config_from_settings(settings: Settings) -> ContextPr
         summary_max_chars=summary_max_chars,
         max_event_history=max_events,
     )
-

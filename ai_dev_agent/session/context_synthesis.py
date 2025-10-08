@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Set, Any
 from collections import defaultdict
 
 from ai_dev_agent.providers.llm.base import Message
+from ai_dev_agent.tools import READ, WRITE, RUN
 
 
 class ContextSynthesizer:
@@ -50,13 +51,13 @@ class ContextSynthesizer:
                         args = tool_call.get("function", {}).get("arguments", {})
 
                         # Track file operations
-                        if "fs.read" in tool_name or "read" in tool_name.lower():
+                        if tool_name == READ or "read" in tool_name.lower():
                             if isinstance(args, dict):
                                 paths = args.get("paths") or [args.get("file_path")]
                                 files_examined.update(p for p in paths if p)
 
                         # Track file modifications
-                        elif "fs.write" in tool_name or "patch" in tool_name.lower():
+                        elif tool_name == WRITE or "write" in tool_name.lower() or "patch" in tool_name.lower():
                             if isinstance(args, dict):
                                 if "diff" in args:
                                     # Extract filenames from diff
@@ -75,7 +76,7 @@ class ContextSynthesizer:
                                     searches_performed.append(query[:50])
 
                         # Track symbol lookups
-                        elif "symbols.find" in tool_name:
+                        elif tool_name == "symbols":
                             if isinstance(args, dict):
                                 name = args.get("name", "")
                                 if name:
@@ -172,7 +173,7 @@ class ContextSynthesizer:
 
                         if isinstance(args, dict):
                             # Track files already read
-                            if "read" in tool_name.lower():
+                            if tool_name == READ or "read" in tool_name.lower():
                                 file_path = args.get("file_path")
                                 if file_path:
                                     redundant["files_read"].add(file_path)
@@ -184,7 +185,7 @@ class ContextSynthesizer:
                                     redundant["searches_done"].add(query)
 
                             # Track executed commands
-                            elif "exec" in tool_name.lower():
+                            elif tool_name == RUN or "run" in tool_name.lower() or "exec" in tool_name.lower():
                                 cmd = args.get("command") or args.get("cmd")
                                 if cmd:
                                     redundant["commands_run"].add(cmd)

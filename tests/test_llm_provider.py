@@ -56,12 +56,12 @@ def test_deepseek_tool_call_parsing(monkeypatch):
                             {
                                 "id": "call_1",
                                 "function": {
-                                    "name": "code.search",
-                                    "arguments": "{\n  \"query\": \"def greet\"\n}",
+                                    "name": "find",
+                                    "arguments": "{\n  \"query\": \"*.py\"\n}",
                                 },
                             }
                         ],
-                        "content": "Searching for def greet",
+                        "content": "Searching for *.py",
                     }
                 }
             ]
@@ -70,16 +70,16 @@ def test_deepseek_tool_call_parsing(monkeypatch):
     monkeypatch.setattr(client, "_post", fake_post)
 
     result = client.invoke_tools(
-        [Message(role="user", content="search for greet")],
-        tools=[{"type": "function", "function": {"name": "code.search", "parameters": {"type": "object"}}}],
+        [Message(role="user", content="search for python files")],
+        tools=[{"type": "function", "function": {"name": "find", "parameters": {"type": "object"}}}],
         temperature=0.0,
     )
 
-    assert payload_captured["tools"][0]["function"]["name"] == "code.search"
-    assert result.message_content == "Searching for def greet"
+    assert payload_captured["tools"][0]["function"]["name"] == "find"
+    assert result.message_content == "Searching for *.py"
     assert len(result.calls) == 1
-    assert result.calls[0].name == "code.search"
-    assert result.calls[0].arguments == {"query": "def greet"}
+    assert result.calls[0].name == "find"
+    assert result.calls[0].arguments == {"query": "*.py"}
 
 
 def test_openrouter_tool_call_parsing_with_provider(monkeypatch):

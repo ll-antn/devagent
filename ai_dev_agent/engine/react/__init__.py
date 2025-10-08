@@ -4,6 +4,7 @@ from __future__ import annotations
 from .loop import ReactiveExecutor
 from .types import (
     ActionRequest,
+    CLIObservation,
     EvaluationResult,
     GateConfig,
     MetricsSnapshot,
@@ -19,6 +20,7 @@ __all__ = [
     "RunResult",
     "ActionRequest",
     "Observation",
+    "CLIObservation",
     "MetricsSnapshot",
     "EvaluationResult",
     "GateConfig",

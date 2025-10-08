@@ -10,6 +10,7 @@ import pytest
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.engine.react.tool_invoker import RegistryToolInvoker
 from ai_dev_agent.engine.react.types import ActionRequest, ToolCall
+from ai_dev_agent.tools import READ
 
 
 @pytest.fixture
@@ -37,21 +38,21 @@ def test_batch_tool_execution(tool_invoker, tmp_path):
     action = ActionRequest(
         step_id="test",
         thought="Read multiple files in parallel",
-        tool="fs.read",  # Backward compatibility field
+        tool=READ,  # Backward compatibility field
         args={},
         tool_calls=[
             ToolCall(
-                tool="fs.read",
+                tool=READ,
                 args={"paths": [str(file1)]},
                 call_id="call_1",
             ),
             ToolCall(
-                tool="fs.read",
+                tool=READ,
                 args={"paths": [str(file2)]},
                 call_id="call_2",
             ),
             ToolCall(
-                tool="fs.read",
+                tool=READ,
                 args={"paths": [str(file3)]},
                 call_id="call_3",
             ),
@@ -71,7 +72,7 @@ def test_batch_tool_execution(tool_invoker, tmp_path):
     # Verify each result
     for result in observation.results:
         assert result.success is True
-        assert result.tool == "fs.read"
+        assert result.tool == READ
         assert result.call_id in ["call_1", "call_2", "call_3"]
 
     # Batch execution should be reasonably fast
@@ -90,7 +91,7 @@ def test_single_tool_backward_compatibility(tool_invoker, tmp_path):
     action = ActionRequest(
         step_id="test",
         thought="Read one file",
-        tool="fs.read",
+        tool=READ,
         args={"paths": [str(test_file)]},
     )
 
@@ -109,11 +110,11 @@ def test_batch_execution_with_failures(tool_invoker, tmp_path):
     action = ActionRequest(
         step_id="test",
         thought="Read files, some missing",
-        tool="fs.read",
+        tool=READ,
         args={},
         tool_calls=[
             ToolCall(
-                tool="fs.read",
+                tool=READ,
                 args={"paths": [str(existing_file)]},
                 call_id="call_1",
             ),
@@ -145,7 +146,7 @@ def test_empty_batch_falls_back_to_single_mode(tool_invoker, tmp_path):
     action = ActionRequest(
         step_id="test",
         thought="Empty batch falls back",
-        tool="fs.read",
+        tool=READ,
         args={"paths": [str(test_file)]},
         tool_calls=[],  # Empty batch - should use single-tool mode
     )

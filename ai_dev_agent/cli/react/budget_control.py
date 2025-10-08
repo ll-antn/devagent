@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+from ai_dev_agent.tools import READ, RUN, WRITE
+
 _DEFAULT_THRESHOLD_EXPLORATION = 30.0
 _DEFAULT_THRESHOLD_INVESTIGATION = 60.0
 _DEFAULT_THRESHOLD_CONSOLIDATION = 85.0
@@ -214,10 +216,10 @@ def filter_non_exploratory_tools(tools: Sequence[Dict[str, Any]]) -> List[Dict[s
 
 def filter_essential_tools(tools: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     essential_names = {
-        "fs.read",
-        "fs.read_text",
+        READ,
+        "fs_read_text",
         "fs.list",
-        "exec",
+        RUN,
         "exec.shell",
         "plan.summarize",
         "summarize",

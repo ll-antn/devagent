@@ -6,18 +6,22 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional
 
 from ai_dev_agent.tools.code.code_edit.editor import CodeEditor
 from ai_dev_agent.engine.react.pipeline import PipelineCommands
 from ai_dev_agent.tools.execution.testing.local_tests import TestRunner
-from ai_dev_agent.tools import ToolContext, registry
+from ai_dev_agent.tools import ToolContext, registry, READ, WRITE, RUN
 from ai_dev_agent.core.utils.devagent_config import DevAgentConfig, load_devagent_yaml
 from ai_dev_agent.core.utils.logger import get_logger
 from ai_dev_agent.core.utils.config import Settings
 from ai_dev_agent.engine.metrics import MetricsCollector
-from ai_dev_agent.tools.code.code_edit.tree_sitter_analysis import extract_symbols_from_outline
-from .types import ActionRequest, Observation, ToolCall, ToolResult
+from ai_dev_agent.core.utils.artifacts import write_artifact
+from ai_dev_agent.core.utils.constants import MIN_TOOL_OUTPUT_CHARS
+from ai_dev_agent.core.utils.context_budget import DEFAULT_MAX_TOOL_OUTPUT_CHARS, summarize_text
+from ai_dev_agent.core.utils.tool_utils import canonical_tool_name
+from ai_dev_agent.session import SessionManager
+from .types import ActionRequest, CLIObservation, Observation, ToolCall, ToolResult
 
 LOGGER = get_logger(__name__)
 
@@ -241,74 +245,99 @@ class RegistryToolInvoker:
         artifacts: list[str] = []
         raw_output: Optional[str] = None
 
-        if tool_name == "fs.read":
+        if tool_name == READ:
             files = result.get("files", [])
             outcome = f"Read {len(files)} file(s)"
-            metrics = {"files": len(files)}
-            artifacts = [entry.get("path") for entry in files if entry.get("path")]
+            total_lines = 0
+            for entry in files:
+                if isinstance(entry, Mapping):
+                    path_value = entry.get("path")
+                    if path_value:
+                        artifacts.append(str(path_value))
+                    content = entry.get("content")
+                    if isinstance(content, str):
+                        total_lines += len(content.splitlines())
+                elif isinstance(entry, str):
+                    artifacts.append(entry)
+            metrics = {"files": len(files), "lines_read": total_lines}
             raw_output = json.dumps(result, indent=2)
-        elif tool_name == "fs.write_patch":
+        elif tool_name == WRITE:
             applied = bool(result.get("applied"))
             rejected = result.get("rejected_hunks") or []
             success = applied and not rejected
-            outcome = "Patch applied" if applied else "Patch validated"
+
+            if applied:
+                outcome = "Patch applied"
+                rejection_reason = None
+            else:
+                first_reason = next((msg for msg in rejected if msg), "")
+                if first_reason:
+                    # Keep the reason compact so the observation stays readable for the agent.
+                    first_line = first_reason.splitlines()[0][:200]
+                    rejection_reason = first_line
+                    outcome = f"Patch rejected: {first_line}"
+                else:
+                    rejection_reason = None
+                    outcome = "Patch rejected: no changes detected"
+
             metrics = {
                 "applied": applied,
                 "rejected_hunks": len(rejected),
                 **(result.get("diff_stats") or {}),
             }
+            if rejection_reason:
+                metrics["rejection_reason"] = rejection_reason
             artifacts = result.get("changed_files") or []
             raw_output = json.dumps(result, indent=2)
-        elif tool_name == "code.search":
+        elif tool_name == "find":
+            files = result.get("files", [])
+            success = bool(files)
+            outcome = f"Found {len(files)} file(s)"
+            artifacts: List[str] = []
+            for entry in files:
+                if isinstance(entry, Mapping):
+                    candidate = entry.get("path") or entry.get("file")
+                    if candidate:
+                        artifacts.append(str(candidate))
+                elif entry:
+                    artifacts.append(str(entry))
+            metrics = {"files": len(files), "paths": artifacts[:10]}
+            raw_output = json.dumps(files[:20], indent=2)
+        elif tool_name == "grep":
             matches = result.get("matches", [])
-            success = len(matches) > 0
-            outcome = f"Found {len(matches)} match(es)"
-            metrics = {"matches": len(matches)}
-            artifacts = [match.get("path") for match in matches if match.get("path")]
-            raw_output = json.dumps(matches[:20], indent=2)
-        elif tool_name == "symbols.index":
-            stats = result.get("stats", {})
-            outcome = "Symbol index updated"
-            metrics = stats
-            artifacts = [result.get("db_path")] if result.get("db_path") else []
-        elif tool_name == "symbols.find":
-            defs = result.get("defs", [])
-            outcome = f"Found {len(defs)} definition(s)"
-            metrics = {"definitions": len(defs)}
-            artifacts = [entry.get("path") for entry in defs if entry.get("path")]
-        elif tool_name == "ast.query":
-            mode = result.get("mode", "query")
-            if mode == "summary":
-                summaries = result.get("summaries", [])
-                outcome = f"Summarised {len(summaries)} file(s)"
-                metrics = {"summaries": len(summaries)}
-                project_summary = result.get("project_summary")
-                preview = {
-                    "summaries": summaries[:5],
-                    "project_summary": project_summary,
-                }
-                raw_output = json.dumps(preview, indent=2)
-                self._update_structure_hints_from_summary(summaries, project_summary)
-            else:
-                nodes = result.get("nodes", [])
-                outcome = f"Matched {len(nodes)} node(s)"
-                metrics = {"nodes": len(nodes)}
-                raw_output = json.dumps(nodes[:10], indent=2)
-        elif tool_name == "exec":
+            success = bool(matches)
+            outcome = f"Found matches in {len(matches)} file(s)"
+            metrics = {"files": len(matches)}
+            artifacts = [
+                group.get("file")
+                for group in matches
+                if isinstance(group, Mapping) and group.get("file")
+            ]
+            raw_output = json.dumps(matches[:10], indent=2)
+        elif tool_name == "symbols":
+            symbols = result.get("symbols", [])
+            outcome = f"Found {len(symbols)} symbol(s)"
+            metrics = {"symbols": len(symbols)}
+            artifacts = [
+                entry.get("file")
+                for entry in symbols
+                if isinstance(entry, Mapping) and entry.get("file")
+            ]
+            raw_output = json.dumps(symbols[:20], indent=2)
+        elif tool_name == RUN:
             exit_code = result.get("exit_code", 0)
             success = exit_code == 0
             outcome = f"Command exited with {exit_code}"
-            metrics = {"exit_code": exit_code, "duration_ms": result.get("duration_ms")}
+            metrics = {
+                "exit_code": exit_code,
+                "duration_ms": result.get("duration_ms"),
+                "stdout_tail": result.get("stdout_tail"),
+                "stderr_tail": result.get("stderr_tail"),
+            }
             raw_output = "STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".format(
                 stdout=result.get("stdout_tail", ""),
                 stderr=result.get("stderr_tail", ""),
             )
-        elif tool_name == "security.secrets_scan":
-            findings = result.get("findings", 0)
-            success = findings == 0
-            outcome = "No secrets detected" if success else f"Found {findings} potential secret(s)"
-            metrics = {"findings": findings}
-            artifacts = [result.get("report_path")] if result.get("report_path") else []
         else:
             metrics = dict(result)
             raw_output = json.dumps(result, indent=2)
@@ -328,27 +357,6 @@ class RegistryToolInvoker:
 
         return Observation(**observations_kwargs)
 
-    def _update_structure_hints_from_summary(
-        self, summaries: List[Mapping[str, Any]], project_summary: Optional[str]
-    ) -> None:
-        file_hints = self._structure_hints.setdefault("files", {})
-        symbol_set: Set[str] = self._structure_hints.setdefault("symbols", set())
-
-        for entry in summaries:
-            path = entry.get("path")
-            outline = entry.get("outline") or []
-            if not path:
-                continue
-            symbols = extract_symbols_from_outline(outline)
-            file_hints[path] = {
-                "outline": outline,
-                "symbols": symbols,
-            }
-            symbol_set.update(symbols)
-
-        if project_summary:
-            self._structure_hints["project_summary"] = project_summary
-
     def _export_structure_hints(self) -> Dict[str, Any]:
         files_payload: Dict[str, Any] = {}
         file_hints = self._structure_hints.get("files") or {}
@@ -366,6 +374,283 @@ class RegistryToolInvoker:
             "files": files_payload,
             "project_summary": self._structure_hints.get("project_summary"),
         }
+
+
+class SessionAwareToolInvoker(RegistryToolInvoker):
+    """Tool invoker that integrates tool output with session history."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        settings: Settings,
+        code_editor: Optional[CodeEditor] = None,
+        test_runner: Optional[TestRunner] = None,
+        sandbox=None,
+        collector: Optional[MetricsCollector] = None,
+        pipeline_commands: Optional[PipelineCommands] = None,
+        devagent_cfg: Optional[DevAgentConfig] = None,
+        *,
+        session_manager: Optional[SessionManager] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            workspace=workspace,
+            settings=settings,
+            code_editor=code_editor,
+            test_runner=test_runner,
+            sandbox=sandbox,
+            collector=collector,
+            pipeline_commands=pipeline_commands,
+            devagent_cfg=devagent_cfg,
+        )
+        self.session_manager = session_manager or (SessionManager.get_instance() if session_id else None)
+        self.session_id = session_id
+        setting_value = getattr(settings, "max_tool_output_chars", DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+        try:
+            parsed_setting = int(setting_value)
+        except (TypeError, ValueError):
+            parsed_setting = DEFAULT_MAX_TOOL_OUTPUT_CHARS
+        self._max_tool_output_chars = max(MIN_TOOL_OUTPUT_CHARS, parsed_setting)
+
+    def __call__(self, action: ActionRequest) -> CLIObservation:
+        base_observation = super().__call__(action)
+        cli_observation = self._to_cli_observation(action, base_observation)
+        self._record_tool_message(action, cli_observation)
+        return cli_observation
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _to_cli_observation(self, action: ActionRequest, observation: Observation) -> CLIObservation:
+        payload = observation.model_dump()
+
+        raw_text = (observation.raw_output or "").strip()
+        outcome_text = (observation.outcome or "").strip()
+        canonical = canonical_tool_name(action.tool)
+
+        if canonical == RUN and raw_text:
+            summary_source = raw_text
+        else:
+            summary_source = raw_text or outcome_text
+
+        summary_text = summary_source
+        artifact_path: Optional[Path] = None
+
+        if summary_source:
+            summarized = summarize_text(summary_source, self._max_tool_output_chars)
+            if summarized != summary_source:
+                summary_text = summarized
+                try:
+                    artifact_path = write_artifact(summary_source)
+                except Exception:  # noqa: BLE001 - best-effort artifact creation
+                    artifact_path = None
+            else:
+                summary_text = summary_source
+
+        formatted_output = summary_text or outcome_text or None
+        if canonical in {"find", "grep"}:
+            formatted_output = None
+
+        display_message = self._format_display_message(action, observation, canonical)
+
+        artifact_display: Optional[str] = None
+        if artifact_path:
+            artifact_display = self._normalize_artifact_path(artifact_path)
+            if formatted_output:
+                formatted_output = f"{formatted_output}\nFull output saved to {artifact_display}"
+            else:
+                formatted_output = f"Full output saved to {artifact_display}"
+
+        payload.update(
+            formatted_output=formatted_output,
+            artifact_path=artifact_display,
+            display_message=display_message,
+        )
+        return CLIObservation.model_validate(payload)
+
+    def _format_display_message(
+        self,
+        action: ActionRequest,
+        observation: Observation,
+        canonical_name: str,
+    ) -> str:
+        success = observation.success
+        status_ok = "✓"
+        status_fail = "✗"
+        base_icon_map = {
+            "find": "🔍",
+            "grep": "🔎",
+            "symbols": "🧭",
+            READ: "📖",
+            RUN: "⚡",
+            "write": "📝",
+        }
+        icon = base_icon_map.get(canonical_name, status_ok if success else status_fail)
+        status_suffix = status_ok if success else status_fail
+
+        def quote(value: Optional[str]) -> str:
+            if not value:
+                return ""
+            return f" \"{value}\""
+
+        if canonical_name == "find":
+            query = (
+                action.args.get("query")
+                or action.args.get("pattern")
+                or action.args.get("path")
+                or action.args.get("name")
+            )
+            matches = observation.metrics.get("files")
+            if matches is None and observation.artifacts:
+                matches = len(observation.artifacts)
+            if isinstance(matches, (int, float)):
+                matches_text = f"{int(matches)} match{'es' if int(matches) != 1 else ''} found"
+            else:
+                matches_text = observation.outcome or ("matches found" if success else "no matches")
+            path_hint = None
+            if observation.artifacts:
+                path_hint = observation.artifacts[0]
+            elif isinstance(observation.metrics.get("raw"), Mapping):
+                raw_files = observation.metrics["raw"].get("files")
+                if isinstance(raw_files, list) and raw_files:
+                    first = raw_files[0]
+                    if isinstance(first, Mapping):
+                        path_hint = first.get("path")
+                    elif isinstance(first, str):
+                        path_hint = first
+            suffix = f" ({path_hint})" if path_hint else ""
+            return f"{icon} find{quote(str(query) if query else None)} → {matches_text}{suffix}"
+
+        if canonical_name == "grep":
+            query = action.args.get("query") or action.args.get("pattern")
+            matches = observation.metrics.get("files")
+            if isinstance(matches, (int, float)):
+                matches_text = f"{int(matches)} file{'s' if int(matches) != 1 else ''}"
+            else:
+                matches_text = observation.outcome or ("matches located" if success else "no matches")
+            return f"{icon} grep{quote(str(query) if query else None)} → {matches_text}"
+
+        if canonical_name == READ:
+            path = action.args.get("path")
+            if not path:
+                paths = action.args.get("paths")
+                if isinstance(paths, list) and paths:
+                    path = paths[0]
+                elif isinstance(paths, str):
+                    path = paths
+            lines_read = observation.metrics.get("lines_read")
+            if isinstance(lines_read, (int, float)) and lines_read > 0:
+                detail = f"{int(lines_read)} line{'s' if int(lines_read) != 1 else ''} read"
+            else:
+                detail = observation.outcome or ("content captured" if success else "read failed")
+            return f"{icon} read{quote(str(path) if path else None)} → {detail}"
+
+        if canonical_name == RUN:
+            cmd = action.args.get("cmd") or action.args.get("command")
+            if not cmd:
+                args = action.args.get("args")
+                if isinstance(args, (list, tuple)) and args:
+                    cmd = " ".join(str(item) for item in args)
+                else:
+                    cmd = str(args) if args else None
+            exit_code = observation.metrics.get("exit_code")
+            if success:
+                status = status_ok
+            else:
+                status = f"{status_fail} exit {exit_code}" if exit_code is not None else status_fail
+            preview_value: Optional[str] = None
+            preview_label = "stdout"
+
+            stdout_tail = observation.metrics.get("stdout_tail")
+            if isinstance(stdout_tail, str):
+                stripped = stdout_tail.strip()
+                if stripped:
+                    preview_value = stripped.splitlines()[0].strip()
+
+            if preview_value is None:
+                stderr_tail = observation.metrics.get("stderr_tail")
+                if isinstance(stderr_tail, str):
+                    stripped_err = stderr_tail.strip()
+                    if stripped_err:
+                        preview_value = stripped_err.splitlines()[0].strip()
+                        preview_label = "stderr"
+
+            if preview_value:
+                if len(preview_value) > 120:
+                    preview_value = f"{preview_value[:117]}..."
+                return f"{icon} run{quote(cmd)} → {status} ({preview_label}: {preview_value})"
+            return f"{icon} run{quote(cmd)} → {status}"
+
+        if canonical_name == "write":
+            targets = observation.metrics.get("artifacts") or observation.artifacts
+            if isinstance(targets, list) and targets:
+                detail = ", ".join(str(item) for item in targets[:3])
+                if len(targets) > 3:
+                    detail += f" (+{len(targets) - 3})"
+            else:
+                detail = observation.outcome or ("changes applied" if success else "no changes")
+            return f"{icon} write → {detail}"
+
+        return f"{icon if success else status_fail} {action.tool}{' → ' + (observation.outcome or status_suffix) if observation.outcome else ''}"
+
+    def _normalize_artifact_path(self, path: Path) -> str:
+        try:
+            relative = path.relative_to(self.workspace)
+        except ValueError:
+            try:
+                relative = path.relative_to(Path.cwd())
+            except ValueError:
+                relative = path
+        return str(relative)
+
+    def _record_tool_message(self, action: ActionRequest, observation: CLIObservation) -> None:
+        if not self.session_manager or not self.session_id:
+            return
+
+        canonical = canonical_tool_name(action.tool)
+        tool_call_id = (
+            action.metadata.get("tool_call_id")
+            or action.metadata.get("call_id")
+            or action.metadata.get("id")
+            or None
+        )
+        content_parts: List[str] = []
+        if observation.display_message:
+            content_parts.append(observation.display_message)
+        elif observation.outcome:
+            content_parts.append(observation.outcome)
+
+        if canonical == RUN:
+            stdout_preview = observation.metrics.get("stdout_tail")
+            if not stdout_preview and observation.raw_output:
+                stdout_section = observation.raw_output.split("STDERR:", 1)[0]
+                lines = [line for line in stdout_section.splitlines()[1:] if line.strip()]
+                stdout_preview = "\n".join(lines)
+            if isinstance(stdout_preview, str):
+                stdout_preview = stdout_preview.strip()
+            if stdout_preview:
+                content_parts.append(f"STDOUT:\n{stdout_preview}")
+
+            stderr_preview = observation.metrics.get("stderr_tail")
+            if not stderr_preview and observation.raw_output and "STDERR:" in observation.raw_output:
+                stderr_section = observation.raw_output.split("STDERR:", 1)[1]
+                stderr_preview = stderr_section.strip()
+            if isinstance(stderr_preview, str):
+                stderr_preview = stderr_preview.strip()
+            if stderr_preview:
+                content_parts.append(f"STDERR:\n{stderr_preview}")
+
+        if observation.artifact_path:
+            content_parts.append(f"(See {observation.artifact_path} for full output)")
+        content = "\n".join(part for part in content_parts if part) or observation.outcome or ""
+        if not content:
+            content = f"{action.tool} completed"
+
+        try:
+            self.session_manager.add_tool_message(self.session_id, tool_call_id, content)
+        except Exception:  # noqa: BLE001 - do not fail loop for logging issues
+            LOGGER.debug("Failed to record tool message for %s", action.tool, exc_info=True)
 
 
 
@@ -393,4 +678,4 @@ def create_tool_invoker(
     )
 
 
-__all__ = ["RegistryToolInvoker", "create_tool_invoker"]
+__all__ = ["RegistryToolInvoker", "SessionAwareToolInvoker", "create_tool_invoker"]

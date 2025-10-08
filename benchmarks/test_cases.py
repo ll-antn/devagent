@@ -10,6 +10,8 @@ from typing import Callable
 class TestCase:
     """A single benchmark test case."""
 
+    __test__ = False
+
     name: str
     query: str
     validator: Callable[[str], bool]
