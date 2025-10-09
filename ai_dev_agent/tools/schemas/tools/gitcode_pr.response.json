@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "files": {
+      "type": "array",
+      "description": "List of changed files with their diffs",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "File path"
+          },
+          "diff": {
+            "type": "string",
+            "description": "Standard diff format content"
+          },
+          "added_lines": {
+            "type": "integer",
+            "description": "Number of lines added in this file"
+          },
+          "removed_lines": {
+            "type": "integer",
+            "description": "Number of lines removed in this file"
+          }
+        },
+        "required": ["file", "diff"],
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Summary information about the PR",
+      "properties": {
+        "total_files": {
+          "type": "integer",
+          "description": "Total number of files changed"
+        },
+        "added_lines": {
+          "type": "integer",
+          "description": "Total lines added across all files"
+        },
+        "removed_lines": {
+          "type": "integer",
+          "description": "Total lines removed across all files"
+        },
+        "base_sha": {
+          "type": "string",
+          "description": "Base commit SHA"
+        },
+        "head_sha": {
+          "type": "string",
+          "description": "Head commit SHA"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message if the request failed"
+    }
+  },
+  "required": ["files"],
+  "additionalProperties": false
+}

@@ -8,6 +8,7 @@ FIND = "find"
 GREP = "grep"
 SYMBOLS = "symbols"
 PARSE_PATCH = "parse_patch"
+GITCODE_PR = "gitcode_pr"
 
 ALL_TOOLS = (
     READ,
@@ -17,6 +18,7 @@ ALL_TOOLS = (
     GREP,
     SYMBOLS,
     PARSE_PATCH,
+    GITCODE_PR,
 )
 
 __all__ = [
@@ -27,5 +29,6 @@ __all__ = [
     "GREP",
     "SYMBOLS",
     "PARSE_PATCH",
+    "GITCODE_PR",
     "ALL_TOOLS",
 ]

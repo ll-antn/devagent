@@ -10,6 +10,7 @@ from .names import (
     GREP,
     SYMBOLS,
     PARSE_PATCH,
+    GITCODE_PR,
     ALL_TOOLS,
 )
 
@@ -27,6 +28,9 @@ from . import symbols as _symbols  # noqa: F401
 # Import patch analysis tools (registration happens in module)
 from . import patch_analysis as _patch_analysis  # noqa: F401
 
+# Import GitCode PR tool
+from . import gitcode_pr as _gitcode_pr  # noqa: F401
+
 __all__ = [
     "ToolContext",
     "ToolSpec",
@@ -38,5 +42,6 @@ __all__ = [
     "GREP",
     "SYMBOLS",
     "PARSE_PATCH",
+    "GITCODE_PR",
     "ALL_TOOLS",
 ]
